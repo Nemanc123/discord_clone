@@ -23,8 +23,10 @@ import (
 	"time"
 
 	"github.com/Nemanc123/discord_clone/internal/api"
+	"github.com/Nemanc123/discord_clone/internal/auth"
 	"github.com/Nemanc123/discord_clone/internal/config"
 	"github.com/Nemanc123/discord_clone/internal/db"
+	"github.com/Nemanc123/discord_clone/internal/store"
 )
 
 func main() {
@@ -53,9 +55,16 @@ func run() error {
 	defer pool.Close()
 	slog.Info("database connected")
 
+	if cfg.JWTSecret == "dev-secret-change-me" {
+		slog.Warn("JWT_SECRET не задан, используется значение для разработки")
+	}
+
+	authService := auth.NewService(store.NewWithPool(pool), cfg.JWTSecret, cfg.AccessTTL, cfg.RefreshTTL)
+	authHandlers := api.NewAuthHandlers(authService)
+
 	srv := &http.Server{
 		Addr:              cfg.HTTPAddr,
-		Handler:           api.NewRouter(pool),
+		Handler:           api.NewRouter(pool, authHandlers),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       15 * time.Second,
 		WriteTimeout:      30 * time.Second,
