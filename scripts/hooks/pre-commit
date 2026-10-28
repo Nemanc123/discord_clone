@@ -1,0 +1,38 @@
+#!/bin/sh
+# Уровень 1: быстрая проверка перед коммитом. Не больше 3 секунд.
+#
+# Что проверяет: форматирование и очевидные ошибки компиляции.
+# Чего НЕ проверяет: тесты, сборку, миграции — это делает check.ps1 и CI.
+#
+# Обход разрешён: git commit --no-verify
+# CI всё равно проверит.
+
+set -e
+
+root=$(git rev-parse --show-toplevel 2>/dev/null) || exit 0
+cd "$root" || exit 0
+
+if ! command -v go >/dev/null 2>&1; then
+    exit 0
+fi
+
+bad=$(gofmt -l . 2>/dev/null || true)
+if [ -n "$bad" ]; then
+    echo ""
+    echo "pre-commit: файлы не отформатированы:"
+    echo "$bad"
+    echo ""
+    echo "исправление: gofmt -w ."
+    echo "обход:       git commit --no-verify"
+    echo ""
+    exit 1
+fi
+
+go vet ./... 2>/dev/null || {
+    echo ""
+    echo "pre-commit: go vet нашёл проблемы (подробнее: go vet ./...)"
+    echo ""
+    exit 1
+}
+
+exit 0

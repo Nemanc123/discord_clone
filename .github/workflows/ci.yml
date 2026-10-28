@@ -1,0 +1,72 @@
+name: CI
+
+# Уровень 3 проверки: чистое окружение, Linux, живой PostgreSQL.
+# Запускается на каждый push в main и на каждый pull request.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  go:
+    name: Go — линтер, тесты, сборка, миграции
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_DB: discord_clone
+          POSTGRES_USER: dc
+          POSTGRES_PASSWORD: devpass
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U dc -d discord_clone"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 12
+
+    env:
+      DATABASE_URL: postgres://dc:devpass@localhost:5432/discord_clone?sslmode=disable
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.27"
+          cache: true
+
+      - name: Применить схему БД
+        run: psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f db/001_init.sql
+
+      - name: Применить демо-данные
+        run: psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f db/002_seed.sql
+
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@v6
+        with:
+          args: --timeout=3m
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: go test
+        run: go test ./...
+
+      - name: go build
+        run: go build ./...
+
+      - name: Проверить форматирование
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "Не отформатировано:"
+            echo "$unformatted"
+            exit 1
+          fi
+
+  # Клиент появится на этапе 0.5 — тогда добавим job для Flutter:
+  # flutter analyze + flutter test на ubuntu-latest.
