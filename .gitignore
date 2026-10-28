@@ -1,0 +1,32 @@
+# --- секреты и локальная конфигурация ---
+.env
+.env.*
+!.env.example
+*.local
+
+# --- Go ---
+/bin/
+/dist/
+*.exe
+*.test
+*.out
+vendor/
+
+# --- Node / веб-клиент ---
+node_modules/
+web/dist/
+.pnpm-store/
+
+# --- Tauri / Rust ---
+src-tauri/target/
+
+# --- Docker / данные ---
+/deploy/data/
+*.log
+
+# --- IDE ---
+.idea/
+.vscode/
+*.swp
+.DS_Store
+Thumbs.db
