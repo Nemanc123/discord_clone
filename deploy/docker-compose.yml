@@ -1,0 +1,103 @@
+# Локальная инфраструктура проекта.
+# Запуск:  cd deploy && docker compose up -d
+# Логи:    docker compose logs -f postgres
+# Стоп:    docker compose down        (данные сохраняются в томах)
+#
+# Все пароли ниже — ТОЛЬКО для локальной разработки.
+# На сервере они задаются через .env (см. .env.example) и не попадают в git.
+
+name: discord_clone
+
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+services:
+  # ---------------------------------------------------------------------------
+  # PostgreSQL — единственный источник истины
+  # ---------------------------------------------------------------------------
+  postgres:
+    image: postgres:17-alpine
+    container_name: dc_postgres
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-discord_clone}
+      POSTGRES_USER: ${POSTGRES_USER:-dc}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-devpass}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      # $$ — чтобы Compose не подставлял переменную, а передал её в контейнер
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 10s
+    logging: *default-logging
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------------------
+  # Redis — presence, pub/sub между узлами шлюза, кэш прав, rate limit.
+  # Персистентность намеренно выключена: всё это восстановимо.
+  # ---------------------------------------------------------------------------
+  redis:
+    image: redis:7-alpine
+    container_name: dc_redis
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+    logging: *default-logging
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------------------
+  # MinIO — S3-совместимое хранилище для вложений и аватарок
+  # Консоль: http://localhost:9001
+  #
+  # ВНИМАНИЕ: образ minio/minio недоступен анонимно (Docker Hub отдаёт 401).
+  # Поэтому сервис вынесен в профиль "storage" и по умолчанию не стартует:
+  #   docker compose --profile storage up -d
+  # Понадобится на этапе 4. Варианты: приватный registry, SeaweedFS
+  # (chrislusf/seaweedfs, S3-совместим) или внешний S3.
+  # ---------------------------------------------------------------------------
+  minio:
+    image: minio/minio:latest
+    container_name: dc_minio
+    profiles: ["storage"]
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-dcminio}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-devminio123}
+    ports:
+      - "${MINIO_PORT:-9000}:9000"
+      - "${MINIO_CONSOLE_PORT:-9001}:9001"
+    volumes:
+      - miniodata:/data
+    logging: *default-logging
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------------------
+  # LiveKit — SFU для голоса и видео.
+  # Режим --dev: ключи devkey/secret, без TLS. Годится только для localhost.
+  # ---------------------------------------------------------------------------
+  livekit:
+    image: livekit/livekit-server:latest
+    container_name: dc_livekit
+    command: ["--dev", "--bind", "0.0.0.0"]
+    ports:
+      - "7880:7880"      # HTTP + WebSocket (сигналинг)
+      - "7881:7881"      # TCP fallback для WebRTC
+      - "7882:7882/udp"  # UDP mux (медиа)
+    logging: *default-logging
+    restart: unless-stopped
+
+volumes:
+  pgdata:
+  miniodata:

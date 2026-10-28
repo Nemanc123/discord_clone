@@ -114,8 +114,10 @@ CREATE TABLE roles (
     mentionable boolean     NOT NULL DEFAULT false,
     created_at  timestamptz NOT NULL DEFAULT now(),
     UNIQUE (guild_id, name),
-    -- нужно для составного FK из member_roles: роль обязана быть из того же сервера
-    UNIQUE (id, guild_id)
+    -- нужно для составного FK из member_roles: роль обязана быть из того же сервера.
+    -- Порядок колонок ВАЖЕН: FK сопоставляет их позиционно, а не по имени,
+    -- поэтому здесь ровно (guild_id, id) — как в членах member_roles.
+    UNIQUE (guild_id, id)
 );
 
 CREATE UNIQUE INDEX roles_one_default_per_guild ON roles (guild_id) WHERE is_default;
@@ -128,7 +130,7 @@ CREATE TABLE member_roles (
     assigned_at timestamptz NOT NULL DEFAULT now(),
     PRIMARY KEY (guild_id, user_id, role_id),
     FOREIGN KEY (guild_id, user_id) REFERENCES guild_members (guild_id, user_id) ON DELETE CASCADE,
-    FOREIGN KEY (guild_id, role_id) REFERENCES roles (id, guild_id)           ON DELETE CASCADE
+    FOREIGN KEY (guild_id, role_id) REFERENCES roles (guild_id, id)           ON DELETE CASCADE
 );
 
 CREATE INDEX member_roles_role_id_idx ON member_roles (role_id);
