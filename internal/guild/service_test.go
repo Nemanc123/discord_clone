@@ -302,17 +302,8 @@ func TestCannotAssignRoleAboveOwn(t *testing.T) {
 	}
 
 	// Роль владельца выше: модератор не должен её выдать.
-	var adminRoleID string
-	for _, r := range detail.Roles {
-		if !r.IsDefault {
-			adminRoleID = r.ID
-		}
-	}
-	if adminRoleID == "" {
-		t.Skip("нет роли выше модератора")
-	}
-
-	// Создаём заведомо более высокую роль от имени владельца.
+	// Создаём заведомо более высокую роль от имени владельца — она встанет
+	// выше роли модератора, и попытка выдать её должна упасть.
 	high, err := e.service.CreateRole(ctx, e.owner, detail.Guild.ID, guild.CreateRoleInput{
 		Name:        "Старший",
 		Permissions: int64(perms.ManageRoles),
@@ -321,7 +312,7 @@ func TestCannotAssignRoleAboveOwn(t *testing.T) {
 		t.Fatalf("создание высокой роли: %v", err)
 	}
 
-	err = e.service.AssignRole(ctx, e.member, detail.Guild.ID, e.owner, high.ID)
+	err = e.service.AssignRole(ctx, e.member, detail.Guild.ID, e.member, high.ID)
 	if !errors.Is(err, guild.ErrHierarchy) {
 		t.Fatalf("ожидали нарушение иерархии, получили %v", err)
 	}
