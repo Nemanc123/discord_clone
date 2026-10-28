@@ -26,6 +26,7 @@ import (
 	"github.com/Nemanc123/discord_clone/internal/auth"
 	"github.com/Nemanc123/discord_clone/internal/config"
 	"github.com/Nemanc123/discord_clone/internal/db"
+	"github.com/Nemanc123/discord_clone/internal/guild"
 	"github.com/Nemanc123/discord_clone/internal/store"
 )
 
@@ -62,9 +63,12 @@ func run() error {
 	authService := auth.NewService(store.NewWithPool(pool), cfg.JWTSecret, cfg.AccessTTL, cfg.RefreshTTL)
 	authHandlers := api.NewAuthHandlers(authService)
 
+	guildService := guild.NewService(store.NewWithPool(pool))
+	guildHandlers := api.NewGuildHandlers(guildService)
+
 	srv := &http.Server{
 		Addr:              cfg.HTTPAddr,
-		Handler:           api.NewRouter(pool, authHandlers),
+		Handler:           api.NewRouter(pool, authHandlers, guildHandlers),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       15 * time.Second,
 		WriteTimeout:      30 * time.Second,

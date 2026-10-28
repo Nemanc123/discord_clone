@@ -41,6 +41,29 @@ func NewWithPool(pool *pgxpool.Pool) *Store {
 	return New(pool)
 }
 
+// Beginner — то, что умеет начинать транзакцию (пул умеет, транзакция — нет).
+type Beginner interface {
+	Begin(ctx context.Context) (pgx.Tx, error)
+}
+
+// Tx начинает транзакцию, если хранилище работает с пулом.
+//
+// Если хранилище уже внутри транзакции (так работают тесты), возвращает себя
+// и nil: вложенных транзакций в PostgreSQL нет, есть только savepoint.
+func (s *Store) Tx(ctx context.Context) (*Store, pgx.Tx, error) {
+	beginner, ok := s.db.(Beginner)
+	if !ok {
+		return s, nil, nil
+	}
+
+	tx, err := beginner.Begin(ctx)
+	if err != nil {
+		return nil, nil, fmt.Errorf("начало транзакции: %w", err)
+	}
+
+	return New(tx), tx, nil
+}
+
 // User — то, что нужно сервису. Пароль отдаётся отдельно, чтобы его
 // нельзя было случайно сериализовать в JSON-ответ.
 type User struct {

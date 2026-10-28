@@ -13,7 +13,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-func NewRouter(pool *pgxpool.Pool, authHandlers *AuthHandlers) http.Handler {
+func NewRouter(pool *pgxpool.Pool, authHandlers *AuthHandlers, guildHandlers *GuildHandlers) http.Handler {
 	r := chi.NewRouter()
 
 	r.Use(middleware.RequestID)
@@ -42,6 +42,17 @@ func NewRouter(pool *pgxpool.Pool, authHandlers *AuthHandlers) http.Handler {
 			r.Post("/auth/logout", authHandlers.Logout)
 			r.Post("/auth/logout-all", authHandlers.LogoutAll)
 			r.Get("/users/@me", authHandlers.Me)
+
+			// Серверы и каналы.
+			r.Post("/guilds", guildHandlers.Create)
+			r.Get("/guilds", guildHandlers.List)
+			r.Get("/guilds/{guildID}", guildHandlers.Get)
+			r.Post("/guilds/{guildID}/channels", guildHandlers.CreateChannel)
+			r.Post("/guilds/{guildID}/roles", guildHandlers.CreateRole)
+			r.Put("/guilds/{guildID}/members/{userID}/roles/{roleID}", guildHandlers.AssignRole)
+			r.Delete("/guilds/{guildID}/members/{userID}/roles/{roleID}", guildHandlers.UnassignRole)
+			r.Post("/guilds/{guildID}/invites", guildHandlers.CreateInvite)
+			r.Post("/invites/{code}", guildHandlers.JoinByInvite)
 		})
 	})
 
