@@ -30,3 +30,8 @@ src-tauri/target/
 *.swp
 .DS_Store
 Thumbs.db
+
+# --- документация не публикуется ---
+/docs/
+/README.md
+
