@@ -17,7 +17,11 @@ func NewRouter(pool *pgxpool.Pool, authHandlers *AuthHandlers, guildHandlers *Gu
 	r := chi.NewRouter()
 
 	r.Use(middleware.RequestID)
-	r.Use(middleware.RealIP)
+	// middleware.RealIP намеренно НЕ используется: он подменяет r.RemoteAddr
+	// значением X-Forwarded-For от кого угодно, и тогда лимит попыток входа
+	// обходится подделкой заголовка (staticcheck SA1019, GHSA-3fxj-6jh8-hvhx).
+	// Когда появится балансировщик, добавим свой middleware, который доверяет
+	// X-Forwarded-For только известным адресам прокси.
 	r.Use(middleware.Recoverer) // паника в обработчике не роняет процесс
 	r.Use(middleware.Timeout(30 * time.Second))
 	r.Use(requestLogger)
