@@ -20,6 +20,8 @@ type Config struct {
 	JWTSecret  string
 	AccessTTL  time.Duration
 	RefreshTTL time.Duration
+
+	RedisURL string
 }
 
 func Load() Config {
@@ -30,6 +32,7 @@ func Load() Config {
 		JWTSecret:   env("JWT_SECRET", "dev-secret-change-me"),
 		AccessTTL:   parseDuration("ACCESS_TTL", 15*time.Minute),
 		RefreshTTL:  parseDuration("REFRESH_TTL", 720*time.Hour), // 30 дней
+		RedisURL:    env("REDIS_URL", "redis://localhost:6379/0"),
 	}
 }
 

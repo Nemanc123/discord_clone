@@ -1,12 +1,13 @@
 // Package gateway — долгоживущие WebSocket-соединения.
 //
-// Хаб хранит подписки «гильдия → клиенты» и рассылает события.
-// Сейчас он внутрипроцессный: хватает для одного экземпляра сервера.
-// При переходе на несколько узлов публикация переедет в Redis pub/sub —
-// интерфейс chat.Publisher для этого и выделен.
+// Хаб хранит подписки «гильдия → клиенты» и рассылает события. Один экземпляр
+// хаба работает в одном процессе; для нескольких экземпляров поверх него
+// ставится Redis pub/sub (internal/fanout), а хаб остаётся точкой доставки
+// в локальные соединения.
 package gateway
 
 import (
+	"context"
 	"sync"
 
 	"github.com/Nemanc123/discord_clone/internal/chat"
@@ -20,13 +21,26 @@ const (
 	OpHeartbeatAck = 11
 )
 
+// PermissionFilter проверяет, может ли пользователь видеть канал.
+// Интерфейс, а не конкретный сервис: хаб не должен знать про БД.
+type PermissionFilter interface {
+	CanView(ctx context.Context, guildID, userID, channelID string) bool
+}
+
 type Hub struct {
 	mu      sync.RWMutex
 	byGuild map[string]map[*Client]struct{}
+	filter  PermissionFilter
 }
 
 func NewHub() *Hub {
 	return &Hub{byGuild: make(map[string]map[*Client]struct{})}
+}
+
+// SetFilter включает проверку прав при рассылке. Без фильтра события
+// получают все подписчики гильдии.
+func (h *Hub) SetFilter(f PermissionFilter) {
+	h.filter = f
 }
 
 func (h *Hub) Register(c *Client) {
@@ -54,7 +68,7 @@ func (h *Hub) Unregister(c *Client) {
 }
 
 // Publish реализует chat.Publisher.
-func (h *Hub) Publish(guildID string, event chat.Event) {
+func (h *Hub) Publish(ctx context.Context, guildID string, event chat.Event) {
 	h.mu.RLock()
 	subscribers := make([]*Client, 0, len(h.byGuild[guildID]))
 	for c := range h.byGuild[guildID] {
@@ -63,6 +77,13 @@ func (h *Hub) Publish(guildID string, event chat.Event) {
 	h.mu.RUnlock()
 
 	for _, c := range subscribers {
+		// Событие канала уходит только тем, кто этот канал видит.
+		// Иначе приватный канал утекал бы через сокет.
+		if event.ChannelID != "" && h.filter != nil {
+			if !h.filter.CanView(ctx, guildID, c.userID, event.ChannelID) {
+				continue
+			}
+		}
 		c.dispatch(event.Type, event.Data)
 	}
 }

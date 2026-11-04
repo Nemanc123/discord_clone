@@ -27,13 +27,17 @@ const (
 // Event — то, что уходит подписчикам через шлюз.
 type Event struct {
 	Type string
-	Data any
+	// ChannelID нужен шлюзу, чтобы проверить VIEW_CHANNEL у получателя.
+	// Пустая строка — событие не привязано к каналу.
+	ChannelID string
+	Data      any
 }
 
 // Publisher отвязывает сервис от конкретного способа доставки.
-// Сейчас это внутрипроцессный хаб, позже — Redis pub/sub.
+// Реализация — либо внутрипроцессный хаб, либо хаб + Redis pub/sub
+// (см. internal/fanout).
 type Publisher interface {
-	Publish(guildID string, event Event)
+	Publish(ctx context.Context, guildID string, event Event)
 }
 
 type Service struct {
@@ -112,7 +116,7 @@ func (s *Service) Post(ctx context.Context, actorID, channelID, content string, 
 		return store.Message{}, err
 	}
 
-	s.publish(channel, Event{Type: "MESSAGE_CREATE", Data: ToView(msg)})
+	s.publish(ctx, channel, Event{Type: "MESSAGE_CREATE", ChannelID: channel.ID, Data: ToView(msg)})
 
 	return msg, nil
 }
@@ -178,7 +182,7 @@ func (s *Service) Edit(ctx context.Context, actorID, messageID, content string) 
 		return store.Message{}, err
 	}
 
-	s.publish(channel, Event{Type: "MESSAGE_UPDATE", Data: ToView(updated)})
+	s.publish(ctx, channel, Event{Type: "MESSAGE_UPDATE", ChannelID: channel.ID, Data: ToView(updated)})
 
 	return updated, nil
 }
@@ -204,7 +208,7 @@ func (s *Service) Delete(ctx context.Context, actorID, messageID string) error {
 		return err
 	}
 
-	s.publish(channel, Event{Type: "MESSAGE_DELETE", Data: map[string]string{
+	s.publish(ctx, channel, Event{Type: "MESSAGE_DELETE", ChannelID: channel.ID, Data: map[string]string{
 		"id":         msg.ID,
 		"channel_id": msg.ChannelID,
 	}})
@@ -251,9 +255,9 @@ func (s *Service) authorize(ctx context.Context, userID, channelID string, want 
 	return channel, nil
 }
 
-func (s *Service) publish(channel store.Channel, event Event) {
+func (s *Service) publish(ctx context.Context, channel store.Channel, event Event) {
 	if s.pub == nil || channel.GuildID == nil {
 		return
 	}
-	s.pub.Publish(*channel.GuildID, event)
+	s.pub.Publish(ctx, *channel.GuildID, event)
 }

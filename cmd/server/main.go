@@ -27,6 +27,7 @@ import (
 	"github.com/Nemanc123/discord_clone/internal/chat"
 	"github.com/Nemanc123/discord_clone/internal/config"
 	"github.com/Nemanc123/discord_clone/internal/db"
+	"github.com/Nemanc123/discord_clone/internal/fanout"
 	"github.com/Nemanc123/discord_clone/internal/gateway"
 	"github.com/Nemanc123/discord_clone/internal/guild"
 	"github.com/Nemanc123/discord_clone/internal/store"
@@ -69,7 +70,20 @@ func run() error {
 	guildHandlers := api.NewGuildHandlers(guildService)
 
 	hub := gateway.NewHub()
-	chatService := chat.NewService(store.NewWithPool(pool), guildService, hub)
+	hub.SetFilter(gateway.NewCachedFilter(guildService, 10*time.Second))
+
+	nodeID := newNodeID()
+
+	// Publisher по умолчанию — только хаб. Если Redis доступен, добавляем
+	// поверх него pub/sub, чтобы события видели другие экземпляры сервера.
+	var publisher chat.Publisher = hub
+	if rdb := connectRedis(ctx, cfg.RedisURL); rdb != nil {
+		defer func() { _ = rdb.Close() }()
+		publisher = fanout.NewPublisher(hub, rdb, nodeID)
+		go fanout.NewSubscriber(hub, rdb, nodeID).Run(ctx)
+	}
+
+	chatService := chat.NewService(store.NewWithPool(pool), guildService, publisher)
 	messageHandlers := api.NewMessageHandlers(chatService)
 	gatewayHandler := gateway.NewHandler(hub, authService, guildService)
 
