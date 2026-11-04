@@ -22,6 +22,7 @@ type Deps struct {
 	Messages *MessageHandlers
 	Presence *PresenceHandlers
 	Gateway  http.Handler
+	Voice    *VoiceHandlers
 }
 
 func NewRouter(d Deps) http.Handler {
@@ -46,6 +47,11 @@ func NewRouter(d Deps) http.Handler {
 	// (IDENTIFY), поэтому middleware RequireAuth здесь не нужен.
 	if d.Gateway != nil {
 		r.Handle("/gateway", d.Gateway)
+	}
+
+	// Вебхуки LiveKit. Аутентификация — подпись в заголовке, не access-токен.
+	if d.Voice != nil {
+		r.Post("/webhooks/livekit", d.Voice.Webhook)
 	}
 
 	r.Route("/api/v1", func(r chi.Router) {
@@ -83,6 +89,12 @@ func NewRouter(d Deps) http.Handler {
 			r.Post("/channels/{channelID}/read", d.Messages.MarkRead)
 			r.Get("/guilds/{guildID}/unread", d.Messages.Unread)
 			r.Get("/guilds/{guildID}/presence", d.Presence.List)
+
+			// Голос.
+			if d.Voice != nil {
+				r.Post("/channels/{channelID}/voice/join", d.Voice.Join)
+				r.Get("/channels/{channelID}/voice", d.Voice.Participants)
+			}
 		})
 	})
 

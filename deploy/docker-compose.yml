@@ -81,12 +81,17 @@ services:
 
   # ---------------------------------------------------------------------------
   # LiveKit — SFU для голоса и видео.
-  # Режим --dev: ключи devkey/secret, без TLS. Годится только для localhost.
+  # Конфиг: deploy/livekit.yaml (ключи devkey/secret, вебхуки на Go-сервер).
+  # Годится только для localhost и локальной сети, без TLS.
   # ---------------------------------------------------------------------------
   livekit:
     image: livekit/livekit-server:latest
     container_name: dc_livekit
-    command: ["--dev", "--bind", "0.0.0.0"]
+    command: ["--config", "/etc/livekit.yaml"]
+    volumes:
+      - ./livekit.yaml:/etc/livekit.yaml:ro
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     ports:
       - "7880:7880"      # HTTP + WebSocket (сигналинг)
       - "7881:7881"      # TCP fallback для WebRTC

@@ -6,6 +6,8 @@ package api_test
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -14,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/golang-jwt/jwt/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/Nemanc123/discord_clone/internal/api"
@@ -23,6 +26,12 @@ import (
 	"github.com/Nemanc123/discord_clone/internal/guild"
 	"github.com/Nemanc123/discord_clone/internal/storage"
 	"github.com/Nemanc123/discord_clone/internal/store"
+	"github.com/Nemanc123/discord_clone/internal/voice"
+)
+
+const (
+	e2eLiveKitKey    = "e2e-key"
+	e2eLiveKitSecret = "e2e-livekit-secret"
 )
 
 type client struct {
@@ -108,12 +117,19 @@ func newTestServer(t *testing.T, files *storage.Storage) (*httptest.Server, *cha
 		chatSvc = chatSvc.WithStorage(files)
 	}
 
+	voiceSvc := voice.NewService(st, gs, voice.TokenIssuer{
+		APIKey:    e2eLiveKitKey,
+		APISecret: e2eLiveKitSecret,
+		TTL:       5 * time.Minute,
+	}, "ws://localhost:7880", nil)
+
 	router := api.NewRouter(api.Deps{
 		Pool:     pool,
 		Auth:     api.NewAuthHandlers(authSvc),
 		Guild:    api.NewGuildHandlers(gs),
 		Messages: api.NewMessageHandlers(chatSvc),
 		Presence: api.NewPresenceHandlers(hub, gs),
+		Voice:    api.NewVoiceHandlers(voiceSvc),
 	})
 
 	srv := httptest.NewServer(router)
@@ -438,4 +454,154 @@ func envOr(key, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+// TestHTTPVoice — голос через HTTP: токен, список участников, вебхуки.
+func TestHTTPVoice(t *testing.T) {
+	srv, _ := newTestServer(t, nil)
+
+	alice := &client{t: t, base: srv.URL}
+	reg := alice.mustDo("POST", "/api/v1/auth/register", map[string]any{
+		"username": randomName(time.Now().UnixNano(), "v"),
+		"password": "very-long-password",
+	}, http.StatusCreated)
+	alice.token = reg["access_token"].(string)
+	aliceID := reg["user"].(map[string]any)["id"].(string)
+
+	created := alice.mustDo("POST", "/api/v1/guilds", map[string]any{
+		"name": "E2E голос",
+	}, http.StatusCreated)
+
+	var voiceID string
+	for _, raw := range created["channels"].([]any) {
+		ch := raw.(map[string]any)
+		if ch["type"] == "voice" {
+			voiceID = ch["id"].(string)
+			break
+		}
+	}
+	if voiceID == "" {
+		t.Fatal("голосовой канал не найден")
+	}
+
+	// 1. Токен на вход.
+	joined := alice.mustDo("POST", "/api/v1/channels/"+voiceID+"/voice/join", map[string]any{}, http.StatusOK)
+	if joined["room"] != voiceID {
+		t.Fatalf("room = %v, ожидали %s", joined["room"], voiceID)
+	}
+	if joined["url"] != "ws://localhost:7880" {
+		t.Fatalf("url = %v", joined["url"])
+	}
+	if joined["can_publish"] != true {
+		t.Fatalf("can_publish = %v", joined["can_publish"])
+	}
+
+	token, _ := joined["token"].(string)
+	if token == "" {
+		t.Fatal("пустой токен")
+	}
+	parsed, err := jwt.Parse(token, func(*jwt.Token) (any, error) {
+		return []byte(e2eLiveKitSecret), nil
+	}, jwt.WithValidMethods([]string{"HS256"}))
+	if err != nil || !parsed.Valid {
+		t.Fatalf("токен не разобрался: %v", err)
+	}
+
+	// 2. Пока никто не зашёл — список пуст.
+	list := alice.mustDo("GET", "/api/v1/channels/"+voiceID+"/voice", nil, http.StatusOK)
+	if got := len(list["participants"].([]any)); got != 0 {
+		t.Fatalf("участников %d, ожидали 0", got)
+	}
+
+	// 3. Вебхук с плохой подписью отклоняется.
+	joinBody := e2eWebhookBody(t, "participant_joined", voiceID, aliceID)
+	if code := e2eWebhook(t, srv.URL, "bad-token", joinBody); code != http.StatusUnauthorized {
+		t.Fatalf("плохая подпись: код %d, ожидали 401", code)
+	}
+
+	// 4. Настоящий вебхук входа создаёт сессию.
+	if code := e2eWebhook(t, srv.URL, e2eSignWebhook(t, joinBody), joinBody); code != http.StatusOK {
+		t.Fatalf("вход: код %d, ожидали 200", code)
+	}
+
+	list = alice.mustDo("GET", "/api/v1/channels/"+voiceID+"/voice", nil, http.StatusOK)
+	participants := list["participants"].([]any)
+	if len(participants) != 1 {
+		t.Fatalf("участников %d, ожидали 1", len(participants))
+	}
+	if participants[0].(map[string]any)["user_id"] != aliceID {
+		t.Fatalf("не тот участник: %v", participants[0])
+	}
+
+	// 5. Посторонний не видит участников.
+	stranger := &client{t: t, base: srv.URL}
+	regStranger := stranger.mustDo("POST", "/api/v1/auth/register", map[string]any{
+		"username": randomName(time.Now().UnixNano(), "w"),
+		"password": "very-long-password",
+	}, http.StatusCreated)
+	stranger.token = regStranger["access_token"].(string)
+	stranger.mustDo("GET", "/api/v1/channels/"+voiceID+"/voice", nil, http.StatusForbidden)
+
+	// 6. Выход закрывает сессию.
+	leaveBody := e2eWebhookBody(t, "participant_left", voiceID, aliceID)
+	if code := e2eWebhook(t, srv.URL, e2eSignWebhook(t, leaveBody), leaveBody); code != http.StatusOK {
+		t.Fatalf("выход: код %d, ожидали 200", code)
+	}
+
+	list = alice.mustDo("GET", "/api/v1/channels/"+voiceID+"/voice", nil, http.StatusOK)
+	if got := len(list["participants"].([]any)); got != 0 {
+		t.Fatalf("после выхода участников %d", got)
+	}
+}
+
+func e2eSignWebhook(t *testing.T, body []byte) string {
+	t.Helper()
+
+	sum := sha256.Sum256(body)
+	claims := jwt.MapClaims{
+		"iss":    e2eLiveKitKey,
+		"sha256": base64.StdEncoding.EncodeToString(sum[:]),
+		"exp":    time.Now().Add(time.Minute).Unix(),
+	}
+	token, err := jwt.NewWithClaims(jwt.SigningMethodHS256, claims).SignedString([]byte(e2eLiveKitSecret))
+	if err != nil {
+		t.Fatalf("подпись вебхука: %v", err)
+	}
+	return token
+}
+
+func e2eWebhookBody(t *testing.T, event, channelID, userID string) []byte {
+	t.Helper()
+
+	payload := map[string]any{
+		"event": event,
+		"room":  map[string]any{"name": channelID, "sid": "RM_e2e"},
+	}
+	if userID != "" {
+		payload["participant"] = map[string]any{"identity": userID, "name": "e2e"}
+	}
+
+	body, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatalf("тело вебхука: %v", err)
+	}
+	return body
+}
+
+func e2eWebhook(t *testing.T, base, token string, body []byte) int {
+	t.Helper()
+
+	req, err := http.NewRequest(http.MethodPost, base+"/webhooks/livekit", bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("запрос вебхука: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", token)
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("вебхук: %v", err)
+	}
+	_ = resp.Body.Close()
+	return resp.StatusCode
 }

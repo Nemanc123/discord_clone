@@ -1,0 +1,27 @@
+# LiveKit для локальной разработки.
+#
+# Отличия от режима --dev: явные ключи и вебхуки. Ключи те же, что в
+# --dev (devkey/secret), поэтому клиенты и сервер не меняются.
+#
+# Вебхуки идут на Go-сервер. Из контейнера адрес хоста — host.docker.internal;
+# compose добавляет эту запись через host-gateway.
+port: 7880
+
+bind_addresses:
+  - "0.0.0.0"
+
+rtc:
+  tcp_port: 7881
+  udp_port: 7882
+  use_external_ip: false
+
+keys:
+  devkey: secret
+
+webhook:
+  api_key: devkey
+  urls:
+    - "http://host.docker.internal:8080/webhooks/livekit"
+
+logging:
+  level: info

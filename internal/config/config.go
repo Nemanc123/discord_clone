@@ -27,6 +27,11 @@ type Config struct {
 	StorageAccessKey string
 	StorageSecretKey string
 	StorageBucket    string
+
+	LiveKitURL       string
+	LiveKitAPIKey    string
+	LiveKitAPISecret string
+	LiveKitTokenTTL  time.Duration
 }
 
 func Load() Config {
@@ -43,6 +48,12 @@ func Load() Config {
 		StorageAccessKey: env("STORAGE_ACCESS_KEY", "dcstorage"),
 		StorageSecretKey: env("STORAGE_SECRET_KEY", "devstorage123"),
 		StorageBucket:    env("STORAGE_BUCKET", "discord-clone"),
+
+		// --dev у LiveKit использует ровно эти ключи. На сервере — свои.
+		LiveKitURL:       env("LIVEKIT_URL", "ws://localhost:7880"),
+		LiveKitAPIKey:    env("LIVEKIT_API_KEY", "devkey"),
+		LiveKitAPISecret: env("LIVEKIT_API_SECRET", "secret"),
+		LiveKitTokenTTL:  parseDuration("LIVEKIT_TOKEN_TTL", 10*time.Minute),
 	}
 }
 

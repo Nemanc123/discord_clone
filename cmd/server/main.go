@@ -32,7 +32,23 @@ import (
 	"github.com/Nemanc123/discord_clone/internal/guild"
 	"github.com/Nemanc123/discord_clone/internal/storage"
 	"github.com/Nemanc123/discord_clone/internal/store"
+	"github.com/Nemanc123/discord_clone/internal/voice"
 )
+
+// voicePublisher переводит события голоса в общий формат шлюза, чтобы
+// они шли теми же путями, что и сообщения: фильтр по VIEW_CHANNEL,
+// Redis fan-out между узлами.
+type voicePublisher struct {
+	pub chat.Publisher
+}
+
+func (p voicePublisher) PublishVoice(ctx context.Context, guildID string, event voice.Event) {
+	p.pub.Publish(ctx, guildID, chat.Event{
+		Type:      event.Type,
+		ChannelID: event.ChannelID,
+		Data:      event.Data,
+	})
+}
 
 func main() {
 	if err := run(); err != nil {
@@ -104,6 +120,22 @@ func run() error {
 	presenceHandlers := api.NewPresenceHandlers(hub, guildService)
 	gatewayHandler := gateway.NewHandler(hub, authService, guildService)
 
+	if cfg.LiveKitAPISecret == "secret" {
+		slog.Warn("используются ключи LiveKit для разработки (devkey/secret)")
+	}
+
+	voiceService := voice.NewService(
+		store.NewWithPool(pool),
+		guildService,
+		voice.TokenIssuer{
+			APIKey:    cfg.LiveKitAPIKey,
+			APISecret: cfg.LiveKitAPISecret,
+			TTL:       cfg.LiveKitTokenTTL,
+		},
+		cfg.LiveKitURL,
+		voicePublisher{pub: publisher},
+	)
+
 	srv := &http.Server{
 		Addr: cfg.HTTPAddr,
 		Handler: api.NewRouter(api.Deps{
@@ -113,6 +145,7 @@ func run() error {
 			Messages: messageHandlers,
 			Presence: presenceHandlers,
 			Gateway:  gatewayHandler,
+			Voice:    api.NewVoiceHandlers(voiceService),
 		}),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       15 * time.Second,
