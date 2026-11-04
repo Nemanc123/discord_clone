@@ -15,7 +15,7 @@ const (
 	sendBuffer = 64
 )
 
-// envelope — конверт события. Единый формат для всех кадров протокола.
+// envelope — конверт кадра. Единый формат для всех сообщений протокола.
 type envelope struct {
 	Op int    `json:"op"`
 	T  string `json:"t,omitempty"`
@@ -23,64 +23,46 @@ type envelope struct {
 	D  any    `json:"d,omitempty"`
 }
 
+// Client — одно активное соединение. Буфер событий живёт в Session,
+// поэтому потеря соединения не теряет события.
 type Client struct {
-	hub       *Hub
-	conn      *websocket.Conn
-	userID    string
-	sessionID string
-	guilds    []string
-	send      chan []byte
-	seq       atomic.Int64
-	closed    atomic.Bool
+	hub     *Hub
+	conn    *websocket.Conn
+	session *Session
+	send    chan []byte
+	closed  atomic.Bool
 }
 
-func newClient(hub *Hub, conn *websocket.Conn, userID, sessionID string, guilds []string) *Client {
+func newClient(hub *Hub, conn *websocket.Conn, session *Session) *Client {
 	return &Client{
-		hub:       hub,
-		conn:      conn,
-		userID:    userID,
-		sessionID: sessionID,
-		guilds:    guilds,
-		send:      make(chan []byte, sendBuffer),
+		hub:     hub,
+		conn:    conn,
+		session: session,
+		send:    make(chan []byte, sendBuffer),
 	}
 }
 
-func (c *Client) guildIDs() []string { return c.guilds }
-
-// dispatch кладёт событие в очередь записи.
-// Если клиент не успевает читать — соединение закрывается:
-// держать бесконечную очередь опаснее, чем разорвать связь.
-func (c *Client) dispatch(eventType string, data any) {
-	payload, err := json.Marshal(envelope{
-		Op: OpDispatch,
-		T:  eventType,
-		S:  c.seq.Add(1),
-		D:  data,
-	})
-	if err != nil {
-		slog.Error("кодирование события", "err", err, "type", eventType)
-		return
-	}
-
+// push ставит готовый кадр в очередь записи.
+func (c *Client) push(payload []byte) {
 	select {
 	case c.send <- payload:
 	default:
-		slog.Warn("клиент не успевает читать, закрываю", "user_id", c.userID)
+		// Клиент не успевает читать: закрываем соединение, но сессия
+		// остаётся — после переподключения события догонятся через RESUME.
+		slog.Warn("клиент не успевает читать, закрываю", "user_id", c.session.UserID)
 		c.close()
 	}
 }
 
+// sendFrame отправляет служебный кадр, который не попадает в буфер
+// (например, HEARTBEAT_ACK).
 func (c *Client) sendFrame(env envelope) {
 	payload, err := json.Marshal(env)
 	if err != nil {
 		slog.Error("кодирование кадра", "err", err, "op", env.Op)
 		return
 	}
-	select {
-	case c.send <- payload:
-	default:
-		c.close()
-	}
+	c.push(payload)
 }
 
 func (c *Client) close() {
@@ -89,8 +71,7 @@ func (c *Client) close() {
 	}
 }
 
-// writePump — единственная горутина, которая пишет в сокет.
-// WebSocket не поддерживает параллельную запись из нескольких горутин.
+// writePump — единственная горутина, пишущая в сокет.
 func (c *Client) writePump() {
 	ticker := time.NewTicker(pongWait / 3)
 	defer func() {
@@ -118,11 +99,13 @@ func (c *Client) writePump() {
 	}
 }
 
-// readPump читает кадры клиента. Сейчас поддерживается только heartbeat:
-// отправка сообщений идёт через HTTP, как в Discord.
+// readPump читает кадры клиента. Отправка сообщений идёт через HTTP,
+// поэтому из входящих поддерживается только heartbeat.
 func (c *Client) readPump() {
 	defer func() {
-		c.hub.Unregister(c)
+		// Сессию не удаляем: снимаем только соединение, чтобы события
+		// продолжали копиться до переподключения.
+		c.hub.Detach(c.session)
 		c.close()
 		_ = c.conn.Close()
 	}()
@@ -142,18 +125,15 @@ func (c *Client) readPump() {
 
 		var env envelope
 		if err := json.Unmarshal(raw, &env); err != nil {
-			slog.Debug("неразборчивый кадр", "err", err, "user_id", c.userID)
+			slog.Debug("неразборчивый кадр", "err", err, "user_id", c.session.UserID)
 			continue
 		}
 
 		switch env.Op {
 		case OpHeartbeat:
 			c.sendFrame(envelope{Op: OpHeartbeatAck})
-		case OpIdentify:
-			// Повторный IDENTIFY на этом этапе не поддерживается.
-			slog.Debug("повторный identify проигнорирован", "user_id", c.userID)
 		default:
-			slog.Debug("неизвестный op", "op", env.Op, "user_id", c.userID)
+			slog.Debug("неизвестный op", "op", env.Op, "user_id", c.session.UserID)
 		}
 	}
 }
