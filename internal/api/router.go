@@ -76,6 +76,7 @@ func NewRouter(d Deps) http.Handler {
 			// Сообщения.
 			r.Post("/channels/{channelID}/messages", d.Messages.Create)
 			r.Get("/channels/{channelID}/messages", d.Messages.List)
+			r.Post("/channels/{channelID}/attachments/presign", d.Messages.Presign)
 			r.Patch("/messages/{messageID}", d.Messages.Update)
 			r.Delete("/messages/{messageID}", d.Messages.Delete)
 			r.Post("/channels/{channelID}/read", d.Messages.MarkRead)

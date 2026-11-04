@@ -20,6 +20,7 @@ import (
 	"github.com/Nemanc123/discord_clone/internal/chat"
 	"github.com/Nemanc123/discord_clone/internal/gateway"
 	"github.com/Nemanc123/discord_clone/internal/guild"
+	"github.com/Nemanc123/discord_clone/internal/storage"
 	"github.com/Nemanc123/discord_clone/internal/store"
 )
 
@@ -72,7 +73,11 @@ func (c *client) mustDo(method, path string, body any, want int) map[string]any 
 	return decoded
 }
 
-func TestHTTPFlow(t *testing.T) {
+// newTestServer собирает полный HTTP-слой на реальной базе во временной
+// транзакции. Если хранилище передано — вложения включены.
+func newTestServer(t *testing.T, files *storage.Storage) (*httptest.Server, *chat.Service) {
+	t.Helper()
+
 	url := os.Getenv("DATABASE_URL")
 	if url == "" {
 		t.Skip("DATABASE_URL не задан")
@@ -96,7 +101,11 @@ func TestHTTPFlow(t *testing.T) {
 	gs := guild.NewService(st)
 	hub := gateway.NewHub()
 	hub.SetFilter(gateway.NewCachedFilter(gs, 10*time.Second))
+
 	chatSvc := chat.NewService(st, gs, hub)
+	if files != nil {
+		chatSvc = chatSvc.WithStorage(files)
+	}
 
 	router := api.NewRouter(api.Deps{
 		Pool:     pool,
@@ -108,6 +117,12 @@ func TestHTTPFlow(t *testing.T) {
 
 	srv := httptest.NewServer(router)
 	t.Cleanup(srv.Close)
+
+	return srv, chatSvc
+}
+
+func TestHTTPFlow(t *testing.T) {
+	srv, _ := newTestServer(t, nil)
 
 	suffix := time.Now().UnixNano()
 	alice := &client{t: t, base: srv.URL}
@@ -243,4 +258,131 @@ func unreadForChannel(t *testing.T, payload map[string]any, channelID string) in
 	}
 	t.Fatalf("канал %s не найден в ответе", channelID)
 	return 0
+}
+
+// TestHTTPAttachments — полный путь файла: ссылка на загрузку → PUT в
+// хранилище → сообщение со вложением → вложение в ленте.
+func TestHTTPAttachments(t *testing.T) {
+	endpoint := os.Getenv("STORAGE_ENDPOINT")
+	if endpoint == "" {
+		t.Skip("STORAGE_ENDPOINT не задан")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	files, err := storage.New(ctx, storage.Config{
+		Endpoint:  endpoint,
+		AccessKey: envOr("STORAGE_ACCESS_KEY", "dcstorage"),
+		SecretKey: envOr("STORAGE_SECRET_KEY", "devstorage123"),
+		Bucket:    envOr("STORAGE_BUCKET", "discord-clone-e2e"),
+	})
+	if err != nil {
+		t.Skipf("хранилище недоступно: %v", err)
+	}
+
+	srv, _ := newTestServer(t, files)
+
+	suffix := time.Now().UnixNano()
+	alice := &client{t: t, base: srv.URL}
+
+	reg := alice.mustDo("POST", "/api/v1/auth/register", map[string]any{
+		"username": randomName(suffix, "f"),
+		"password": "very-long-password",
+	}, http.StatusCreated)
+	alice.token = reg["access_token"].(string)
+
+	created := alice.mustDo("POST", "/api/v1/guilds", map[string]any{
+		"name": "E2E вложения",
+	}, http.StatusCreated)
+
+	var channelID string
+	for _, raw := range created["channels"].([]any) {
+		ch := raw.(map[string]any)
+		if ch["type"] == "text" {
+			channelID = ch["id"].(string)
+			break
+		}
+	}
+	if channelID == "" {
+		t.Fatal("текстовый канал не найден")
+	}
+
+	// 1. Ссылка на загрузку.
+	presign := alice.mustDo("POST", "/api/v1/channels/"+channelID+"/attachments/presign", map[string]any{
+		"filename":     "заметка.txt",
+		"content_type": "text/plain",
+		"size_bytes":   len("содержимое файла"),
+	}, http.StatusCreated)
+
+	storageKey := presign["storage_key"].(string)
+	uploadURL := presign["upload_url"].(string)
+	if storageKey == "" || uploadURL == "" {
+		t.Fatalf("пустой ответ presign: %v", presign)
+	}
+
+	// 2. Загрузка напрямую в хранилище, мимо сервера.
+	body := []byte("содержимое файла")
+	req, err := http.NewRequest(http.MethodPut, uploadURL, bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("запрос загрузки: %v", err)
+	}
+	req.Header.Set("Content-Type", "text/plain")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("загрузка: %v", err)
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
+		t.Fatalf("загрузка вернула %d", resp.StatusCode)
+	}
+
+	// 3. Сообщение с вложением: в ответе вложение должно быть сразу.
+	posted := alice.mustDo("POST", "/api/v1/channels/"+channelID+"/messages", map[string]any{
+		"content": "файл во вложении",
+		"attachments": []map[string]any{{
+			"storage_key":  storageKey,
+			"filename":     "заметка.txt",
+			"content_type": "text/plain",
+			"size_bytes":   len(body),
+		}},
+	}, http.StatusCreated)
+
+	attachments, ok := posted["attachments"].([]any)
+	if !ok || len(attachments) != 1 {
+		t.Fatalf("в ответе нет вложения: %v", posted)
+	}
+	if attachments[0].(map[string]any)["storage_key"] != storageKey {
+		t.Fatalf("ключ вложения не совпал: %v", attachments[0])
+	}
+
+	// 4. Лента тоже отдаёт вложение.
+	history := alice.mustDo("GET", "/api/v1/channels/"+channelID+"/messages", nil, http.StatusOK)
+	messages := history["messages"].([]any)
+	if len(messages) != 1 {
+		t.Fatalf("в ленте %d сообщений, ожидали 1", len(messages))
+	}
+	fromHistory, ok := messages[0].(map[string]any)["attachments"].([]any)
+	if !ok || len(fromHistory) != 1 {
+		t.Fatalf("в ленте нет вложения: %v", messages[0])
+	}
+
+	// 5. Несуществующий ключ прикрепить нельзя.
+	alice.mustDo("POST", "/api/v1/channels/"+channelID+"/messages", map[string]any{
+		"content": "битая ссылка",
+		"attachments": []map[string]any{{
+			"storage_key":  "attachments/нет-такого/файл.txt",
+			"filename":     "файл.txt",
+			"content_type": "text/plain",
+			"size_bytes":   10,
+		}},
+	}, http.StatusBadRequest)
+}
+
+func envOr(key, fallback string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return fallback
 }

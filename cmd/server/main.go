@@ -30,6 +30,7 @@ import (
 	"github.com/Nemanc123/discord_clone/internal/fanout"
 	"github.com/Nemanc123/discord_clone/internal/gateway"
 	"github.com/Nemanc123/discord_clone/internal/guild"
+	"github.com/Nemanc123/discord_clone/internal/storage"
 	"github.com/Nemanc123/discord_clone/internal/store"
 )
 
@@ -84,6 +85,21 @@ func run() error {
 	}
 
 	chatService := chat.NewService(store.NewWithPool(pool), guildService, publisher)
+
+	// Хранилище файлов необязательно: без него сервер работает, но вложения
+	// отвечают ошибкой «хранилище не настроено».
+	if st, err := storage.New(ctx, storage.Config{
+		Endpoint:  cfg.StorageEndpoint,
+		AccessKey: cfg.StorageAccessKey,
+		SecretKey: cfg.StorageSecretKey,
+		Bucket:    cfg.StorageBucket,
+	}); err != nil {
+		slog.Warn("хранилище недоступно: вложения отключены", "err", err)
+	} else {
+		chatService = chatService.WithStorage(st)
+		slog.Info("хранилище файлов подключено", "endpoint", cfg.StorageEndpoint)
+	}
+
 	messageHandlers := api.NewMessageHandlers(chatService)
 	presenceHandlers := api.NewPresenceHandlers(hub, guildService)
 	gatewayHandler := gateway.NewHandler(hub, authService, guildService)

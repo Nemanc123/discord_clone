@@ -41,9 +41,32 @@ jobs:
     env:
       DATABASE_URL: postgres://dc:devpass@localhost:5432/discord_clone?sslmode=disable
       REDIS_URL: redis://localhost:6379/0
+      STORAGE_ENDPOINT: localhost:8333
+      STORAGE_ACCESS_KEY: dcstorage
+      STORAGE_SECRET_KEY: devstorage123
 
     steps:
       - uses: actions/checkout@v4
+
+      - name: Запустить SeaweedFS
+        run: |
+          # Сервис-контейнеры GitHub не умеют монтировать файл из репозитория:
+          # checkout происходит позже. Поэтому поднимаем хранилище шагом.
+          docker run -d --name dc_storage -p 8333:8333 \
+            -v "$PWD/deploy/seaweedfs-s3.json:/etc/seaweedfs/s3.json:ro" \
+            chrislusf/seaweedfs:latest \
+            server -s3 -s3.port=8333 -dir=/data -s3.config=/etc/seaweedfs/s3.json
+
+          for i in $(seq 1 30); do
+            if (echo > /dev/tcp/127.0.0.1/8333) 2>/dev/null; then
+              echo "хранилище готово за ${i}с"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "хранилище не поднялось"
+          docker logs dc_storage
+          exit 1
 
       - uses: actions/setup-go@v5
         with:

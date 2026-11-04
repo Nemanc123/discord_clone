@@ -22,6 +22,11 @@ type Config struct {
 	RefreshTTL time.Duration
 
 	RedisURL string
+
+	StorageEndpoint  string
+	StorageAccessKey string
+	StorageSecretKey string
+	StorageBucket    string
 }
 
 func Load() Config {
@@ -33,6 +38,11 @@ func Load() Config {
 		AccessTTL:   parseDuration("ACCESS_TTL", 15*time.Minute),
 		RefreshTTL:  parseDuration("REFRESH_TTL", 720*time.Hour), // 30 дней
 		RedisURL:    env("REDIS_URL", "redis://localhost:6379/0"),
+
+		StorageEndpoint:  env("STORAGE_ENDPOINT", "localhost:8333"),
+		StorageAccessKey: env("STORAGE_ACCESS_KEY", "dcstorage"),
+		StorageSecretKey: env("STORAGE_SECRET_KEY", "devstorage123"),
+		StorageBucket:    env("STORAGE_BUCKET", "discord-clone"),
 	}
 }
 

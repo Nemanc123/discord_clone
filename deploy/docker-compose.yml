@@ -58,28 +58,24 @@ services:
     restart: unless-stopped
 
   # ---------------------------------------------------------------------------
-  # MinIO — S3-совместимое хранилище для вложений и аватарок
-  # Консоль: http://localhost:9001
+  # SeaweedFS — S3-совместимое хранилище для вложений и аватарок.
   #
-  # ВНИМАНИЕ: образ minio/minio недоступен анонимно (Docker Hub отдаёт 401).
-  # Поэтому сервис вынесен в профиль "storage" и по умолчанию не стартует:
-  #   docker compose --profile storage up -d
-  # Понадобится на этапе 4. Варианты: приватный registry, SeaweedFS
-  # (chrislusf/seaweedfs, S3-совместим) или внешний S3.
+  # Почему не MinIO: его образы недоступны анонимно (Docker Hub — pull access
+  # denied, quay — 401). SeaweedFS отдаёт тот же S3 API, а код работает через
+  # стандартный клиент, поэтому переезд на Cloudflare R2 или Backblaze B2 —
+  # это смена адреса и ключей, а не переписывание.
+  #
+  # S3 endpoint: http://localhost:8333
   # ---------------------------------------------------------------------------
-  minio:
-    image: minio/minio:latest
-    container_name: dc_minio
-    profiles: ["storage"]
-    command: server /data --console-address ":9001"
-    environment:
-      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-dcminio}
-      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-devminio123}
-    ports:
-      - "${MINIO_PORT:-9000}:9000"
-      - "${MINIO_CONSOLE_PORT:-9001}:9001"
+  storage:
+    image: chrislusf/seaweedfs:latest
+    container_name: dc_storage
+    command: server -s3 -s3.port=8333 -dir=/data -s3.config=/etc/seaweedfs/s3.json
     volumes:
-      - miniodata:/data
+      - seaweeddata:/data
+      - ./seaweedfs-s3.json:/etc/seaweedfs/s3.json:ro
+    ports:
+      - "${STORAGE_PORT:-8333}:8333"
     logging: *default-logging
     restart: unless-stopped
 
@@ -100,4 +96,4 @@ services:
 
 volumes:
   pgdata:
-  miniodata:
+  seaweeddata:

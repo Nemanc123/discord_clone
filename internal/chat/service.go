@@ -3,8 +3,11 @@ package chat
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -22,6 +25,10 @@ const (
 	MaxContentLen = 4000
 	DefaultLimit  = 50
 	MaxLimit      = 100
+
+	// MaxAttachmentBytes — предел на один файл.
+	MaxAttachmentBytes = 25 << 20
+	MaxFilenameLen     = 255
 )
 
 // Event — то, что уходит подписчикам через шлюз.
@@ -40,27 +47,50 @@ type Publisher interface {
 	Publish(ctx context.Context, guildID string, event Event)
 }
 
+// AttachmentStorage — минимум, который нужен сервису от хранилища файлов.
+type AttachmentStorage interface {
+	PresignedPut(ctx context.Context, key string) (string, error)
+	Stat(ctx context.Context, key string) (size int64, exists bool, err error)
+}
+
 type Service struct {
-	store *store.Store
-	guild *guild.Service
-	pub   Publisher
+	store   *store.Store
+	guild   *guild.Service
+	pub     Publisher
+	storage AttachmentStorage
 }
 
 func NewService(st *store.Store, gs *guild.Service, pub Publisher) *Service {
 	return &Service{store: st, guild: gs, pub: pub}
 }
 
+// WithStorage включает поддержку вложений. Без хранилища сервис работает
+// как раньше — текстовые сообщения без файлов.
+func (s *Service) WithStorage(st AttachmentStorage) *Service {
+	s.storage = st
+	return s
+}
+
 // MessageView — сообщение в том виде, в каком его видят клиенты.
 type MessageView struct {
-	ID        string     `json:"id"`
-	Seq       int64      `json:"seq"`
-	ChannelID string     `json:"channel_id"`
-	AuthorID  *string    `json:"author_id,omitempty"`
-	Content   string     `json:"content"`
-	Type      string     `json:"type"`
-	ReplyToID *string    `json:"reply_to_id,omitempty"`
-	CreatedAt time.Time  `json:"created_at"`
-	EditedAt  *time.Time `json:"edited_at,omitempty"`
+	ID          string           `json:"id"`
+	Seq         int64            `json:"seq"`
+	ChannelID   string           `json:"channel_id"`
+	AuthorID    *string          `json:"author_id,omitempty"`
+	Content     string           `json:"content"`
+	Type        string           `json:"type"`
+	ReplyToID   *string          `json:"reply_to_id,omitempty"`
+	CreatedAt   time.Time        `json:"created_at"`
+	EditedAt    *time.Time       `json:"edited_at,omitempty"`
+	Attachments []AttachmentView `json:"attachments,omitempty"`
+}
+
+type AttachmentView struct {
+	ID          string `json:"id"`
+	Filename    string `json:"filename"`
+	ContentType string `json:"content_type"`
+	SizeBytes   int64  `json:"size_bytes"`
+	StorageKey  string `json:"storage_key"`
 }
 
 func ToView(m store.Message) MessageView {
@@ -77,18 +107,61 @@ func ToView(m store.Message) MessageView {
 	}
 }
 
+func toViewWithAttachments(m store.Message, attachments []store.Attachment) MessageView {
+	view := ToView(m)
+	if len(attachments) == 0 {
+		return view
+	}
+
+	view.Attachments = make([]AttachmentView, 0, len(attachments))
+	for _, a := range attachments {
+		view.Attachments = append(view.Attachments, AttachmentView{
+			ID:          a.ID,
+			Filename:    a.Filename,
+			ContentType: a.ContentType,
+			SizeBytes:   a.SizeBytes,
+			StorageKey:  a.StorageKey,
+		})
+	}
+	return view
+}
+
 func (s *Service) Post(ctx context.Context, actorID, channelID, content string, replyTo *string) (store.Message, error) {
+	msg, _, err := s.post(ctx, actorID, channelID, content, replyTo, nil)
+	return msg, err
+}
+
+// PostWithAttachments — отправка с файлами. Вложения уже должны быть
+// загружены в хранилище по ссылке из PresignAttachment.
+// Возвращает готовое представление: клиенту нужны вложения в ответе,
+// иначе после отправки придётся перечитывать ленту.
+func (s *Service) PostWithAttachments(ctx context.Context, actorID, channelID, content string, replyTo *string, attachments []store.CreateAttachmentParams) (MessageView, error) {
+	msg, stored, err := s.post(ctx, actorID, channelID, content, replyTo, attachments)
+	if err != nil {
+		return MessageView{}, err
+	}
+	return toViewWithAttachments(msg, stored), nil
+}
+
+func (s *Service) post(ctx context.Context, actorID, channelID, content string, replyTo *string, attachments []store.CreateAttachmentParams) (store.Message, []store.Attachment, error) {
 	channel, err := s.authorize(ctx, actorID, channelID, perms.SendMessages)
 	if err != nil {
-		return store.Message{}, err
+		return store.Message{}, nil, err
 	}
 
 	content = strings.TrimSpace(content)
-	if content == "" {
-		return store.Message{}, fmt.Errorf("%w: сообщение не может быть пустым", ErrValidation)
+	if content == "" && len(attachments) == 0 {
+		return store.Message{}, nil, fmt.Errorf("%w: сообщение не может быть пустым", ErrValidation)
 	}
 	if len([]rune(content)) > MaxContentLen {
-		return store.Message{}, fmt.Errorf("%w: сообщение длиннее %d символов", ErrValidation, MaxContentLen)
+		return store.Message{}, nil, fmt.Errorf("%w: сообщение длиннее %d символов", ErrValidation, MaxContentLen)
+	}
+
+	// Вложения проверяем до создания сообщения: иначе при битом ключе
+	// в базе останется пустое сообщение, а клиент получит ошибку.
+	prepared, err := s.validateAttachments(ctx, attachments)
+	if err != nil {
+		return store.Message{}, nil, err
 	}
 
 	msgType := "default"
@@ -96,12 +169,12 @@ func (s *Service) Post(ctx context.Context, actorID, channelID, content string, 
 		msgType = "reply"
 		parent, err := s.store.MessageByID(ctx, *replyTo)
 		if err != nil {
-			return store.Message{}, fmt.Errorf("%w: сообщение для ответа не найдено", ErrValidation)
+			return store.Message{}, nil, fmt.Errorf("%w: сообщение для ответа не найдено", ErrValidation)
 		}
 		// Отвечать можно только внутри того же канала: иначе ответ
 		// утащит читателя в другую ветку разговора.
 		if parent.ChannelID != channelID {
-			return store.Message{}, fmt.Errorf("%w: ответ должен быть в том же канале", ErrValidation)
+			return store.Message{}, nil, fmt.Errorf("%w: ответ должен быть в том же канале", ErrValidation)
 		}
 	}
 
@@ -113,17 +186,69 @@ func (s *Service) Post(ctx context.Context, actorID, channelID, content string, 
 		ReplyToID: replyTo,
 	})
 	if err != nil {
-		return store.Message{}, err
+		return store.Message{}, nil, err
 	}
 
-	s.publish(ctx, channel, Event{Type: "MESSAGE_CREATE", ChannelID: channel.ID, Data: ToView(msg)})
+	stored := make([]store.Attachment, 0, len(prepared))
+	for _, attachment := range prepared {
+		attachment.MessageID = msg.ID
+		created, err := s.store.CreateAttachment(ctx, attachment)
+		if err != nil {
+			return store.Message{}, nil, err
+		}
+		stored = append(stored, created)
+	}
 
-	return msg, nil
+	s.publish(ctx, channel, Event{
+		Type:      "MESSAGE_CREATE",
+		ChannelID: channel.ID,
+		Data:      toViewWithAttachments(msg, stored),
+	})
+
+	return msg, stored, nil
+}
+
+// validateAttachments проверяет файлы до вставки сообщения и подменяет
+// размер клиента на реальный размер объекта в хранилище.
+func (s *Service) validateAttachments(ctx context.Context, attachments []store.CreateAttachmentParams) ([]store.CreateAttachmentParams, error) {
+	if len(attachments) == 0 {
+		return nil, nil
+	}
+	if s.storage == nil {
+		return nil, fmt.Errorf("%w: хранилище файлов не настроено", ErrValidation)
+	}
+
+	out := make([]store.CreateAttachmentParams, 0, len(attachments))
+	for _, a := range attachments {
+		a.Filename = strings.TrimSpace(a.Filename)
+		if a.StorageKey == "" {
+			return nil, fmt.Errorf("%w: у вложения нет ключа хранилища", ErrValidation)
+		}
+		if a.Filename == "" || len([]rune(a.Filename)) > MaxFilenameLen {
+			return nil, fmt.Errorf("%w: имя файла — от 1 до %d символов", ErrValidation, MaxFilenameLen)
+		}
+
+		size, exists, err := s.storage.Stat(ctx, a.StorageKey)
+		if err != nil {
+			return nil, err
+		}
+		if !exists {
+			return nil, fmt.Errorf("%w: файл не загружен в хранилище", ErrValidation)
+		}
+		if size <= 0 || size > MaxAttachmentBytes {
+			return nil, fmt.Errorf("%w: размер файла — от 1 байта до 25 МиБ", ErrValidation)
+		}
+
+		// Размер берём из хранилища: клиентское значение можно подделать.
+		a.SizeBytes = size
+		out = append(out, a)
+	}
+	return out, nil
 }
 
 // History отдаёт ленту назад от курсора before (0 — с конца).
 // Результат в обратном порядке: от старых к новым, как удобно рисовать.
-func (s *Service) History(ctx context.Context, actorID, channelID string, before int64, limit int32) ([]store.Message, error) {
+func (s *Service) History(ctx context.Context, actorID, channelID string, before int64, limit int32) ([]MessageView, error) {
 	if _, err := s.authorize(ctx, actorID, channelID, perms.ViewChannel); err != nil {
 		return nil, err
 	}
@@ -143,12 +268,28 @@ func (s *Service) History(ctx context.Context, actorID, channelID string, before
 		return nil, err
 	}
 
-	// Разворачиваем: клиенту удобнее рисовать сверху вниз.
-	for i, j := 0, len(msgs)-1; i < j; i, j = i+1, j-1 {
-		msgs[i], msgs[j] = msgs[j], msgs[i]
+	// Вложения грузим одной пачкой: по запросу на сообщение — это N+1.
+	ids := make([]string, 0, len(msgs))
+	for _, m := range msgs {
+		ids = append(ids, m.ID)
 	}
 
-	return msgs, nil
+	attachments, err := s.store.AttachmentsForMessages(ctx, ids)
+	if err != nil {
+		return nil, err
+	}
+
+	views := make([]MessageView, 0, len(msgs))
+	for _, m := range msgs {
+		views = append(views, toViewWithAttachments(m, attachments[m.ID]))
+	}
+
+	// Разворачиваем: клиенту удобнее рисовать сверху вниз.
+	for i, j := 0, len(views)-1; i < j; i, j = i+1, j-1 {
+		views[i], views[j] = views[j], views[i]
+	}
+
+	return views, nil
 }
 
 func (s *Service) Edit(ctx context.Context, actorID, messageID, content string) (store.Message, error) {
@@ -240,6 +381,43 @@ func (s *Service) Unread(ctx context.Context, userID, guildID string) ([]store.U
 	}
 
 	return s.store.UnreadForGuild(ctx, userID, guildID)
+}
+
+// PresignAttachment выдаёт ссылку на загрузку и ключ, который потом
+// прикрепляется к сообщению. Сам файл через сервер не идёт.
+func (s *Service) PresignAttachment(ctx context.Context, userID, channelID, filename string, sizeBytes int64) (key, uploadURL string, err error) {
+	if s.storage == nil {
+		return "", "", fmt.Errorf("%w: хранилище файлов не настроено", ErrValidation)
+	}
+
+	if _, err := s.authorize(ctx, userID, channelID, perms.AttachFiles); err != nil {
+		return "", "", err
+	}
+
+	filename = strings.TrimSpace(filename)
+	if filename == "" || len([]rune(filename)) > MaxFilenameLen {
+		return "", "", fmt.Errorf("%w: имя файла — от 1 до %d символов", ErrValidation, MaxFilenameLen)
+	}
+	if sizeBytes <= 0 || sizeBytes > MaxAttachmentBytes {
+		return "", "", fmt.Errorf("%w: размер файла — от 1 байта до 25 МиБ", ErrValidation)
+	}
+
+	key = fmt.Sprintf("attachments/%s/%s%s", channelID, randomID(), strings.ToLower(filepath.Ext(filename)))
+
+	uploadURL, err = s.storage.PresignedPut(ctx, key)
+	if err != nil {
+		return "", "", err
+	}
+
+	return key, uploadURL, nil
+}
+
+func randomID() string {
+	buf := make([]byte, 8)
+	if _, err := rand.Read(buf); err != nil {
+		return fmt.Sprintf("t%d", time.Now().UnixNano())
+	}
+	return hex.EncodeToString(buf)
 }
 
 func (s *Service) requireChannelPermission(ctx context.Context, userID, channelID string, want perms.Permission) error {

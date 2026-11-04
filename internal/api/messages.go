@@ -21,8 +21,16 @@ func NewMessageHandlers(svc *chat.Service) *MessageHandlers {
 }
 
 type createMessageRequest struct {
-	Content   string  `json:"content"`
-	ReplyToID *string `json:"reply_to_id"`
+	Content     string                    `json:"content"`
+	ReplyToID   *string                   `json:"reply_to_id"`
+	Attachments []createAttachmentRequest `json:"attachments"`
+}
+
+type createAttachmentRequest struct {
+	StorageKey  string `json:"storage_key"`
+	Filename    string `json:"filename"`
+	ContentType string `json:"content_type"`
+	SizeBytes   int64  `json:"size_bytes"`
 }
 
 type updateMessageRequest struct {
@@ -39,13 +47,53 @@ func (h *MessageHandlers) Create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	msg, err := h.svc.Post(r.Context(), userID, channelID, req.Content, req.ReplyToID)
+	attachments := make([]store.CreateAttachmentParams, 0, len(req.Attachments))
+	for _, a := range req.Attachments {
+		attachments = append(attachments, store.CreateAttachmentParams{
+			StorageKey:  a.StorageKey,
+			Filename:    a.Filename,
+			ContentType: a.ContentType,
+			SizeBytes:   a.SizeBytes,
+		})
+	}
+
+	msg, err := h.svc.PostWithAttachments(r.Context(), userID, channelID, req.Content, req.ReplyToID, attachments)
 	if err != nil {
 		mapChatError(w, err)
 		return
 	}
 
-	writeJSON(w, http.StatusCreated, chat.ToView(msg))
+	writeJSON(w, http.StatusCreated, msg)
+}
+
+type presignRequest struct {
+	Filename    string `json:"filename"`
+	ContentType string `json:"content_type"`
+	SizeBytes   int64  `json:"size_bytes"`
+}
+
+// Presign выдаёт ссылку, по которой клиент сам загрузит файл в хранилище.
+func (h *MessageHandlers) Presign(w http.ResponseWriter, r *http.Request) {
+	userID, _ := UserIDFrom(r.Context())
+	channelID := chi.URLParam(r, "channelID")
+
+	var req presignRequest
+	if err := decodeJSON(w, r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_json", "тело запроса должно быть JSON-объектом")
+		return
+	}
+
+	key, uploadURL, err := h.svc.PresignAttachment(r.Context(), userID, channelID, req.Filename, req.SizeBytes)
+	if err != nil {
+		mapChatError(w, err)
+		return
+	}
+
+	writeJSON(w, http.StatusCreated, map[string]any{
+		"storage_key": key,
+		"upload_url":  uploadURL,
+		"expires_in":  900,
+	})
 }
 
 func (h *MessageHandlers) List(w http.ResponseWriter, r *http.Request) {
@@ -78,12 +126,7 @@ func (h *MessageHandlers) List(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	views := make([]chat.MessageView, 0, len(msgs))
-	for _, m := range msgs {
-		views = append(views, chat.ToView(m))
-	}
-
-	writeJSON(w, http.StatusOK, map[string]any{"messages": views})
+	writeJSON(w, http.StatusOK, map[string]any{"messages": msgs})
 }
 
 func (h *MessageHandlers) Update(w http.ResponseWriter, r *http.Request) {
