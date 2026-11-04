@@ -13,7 +13,17 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-func NewRouter(pool *pgxpool.Pool, authHandlers *AuthHandlers, guildHandlers *GuildHandlers) http.Handler {
+// Deps — всё, что нужно маршрутизатору. Структура вместо длинного списка
+// аргументов: добавить обработчик — добавить поле, а не менять сигнатуру.
+type Deps struct {
+	Pool     *pgxpool.Pool
+	Auth     *AuthHandlers
+	Guild    *GuildHandlers
+	Messages *MessageHandlers
+	Gateway  http.Handler
+}
+
+func NewRouter(d Deps) http.Handler {
 	r := chi.NewRouter()
 
 	r.Use(middleware.RequestID)
@@ -26,37 +36,47 @@ func NewRouter(pool *pgxpool.Pool, authHandlers *AuthHandlers, guildHandlers *Gu
 	r.Use(middleware.Timeout(30 * time.Second))
 	r.Use(requestLogger)
 
-	// Liveness: процесс жив. Используется systemd/docker/балансировщиком.
+	// Liveness: процесс жив.
 	r.Get("/healthz", liveness)
+	// Readiness: живы ли зависимости.
+	r.Get("/readyz", readiness(d.Pool))
 
-	// Readiness: живы ли зависимости. Если база недоступна — 503,
-	// и балансировщик перестанет слать сюда трафик.
-	r.Get("/readyz", readiness(pool))
+	// WebSocket-шлюз. Аутентификация происходит внутри рукопожатия
+	// (IDENTIFY), поэтому middleware RequireAuth здесь не нужен.
+	if d.Gateway != nil {
+		r.Handle("/gateway", d.Gateway)
+	}
 
 	r.Route("/api/v1", func(r chi.Router) {
 		// Публичные: доступны без токена.
-		r.Post("/auth/register", authHandlers.Register)
-		r.Post("/auth/login", authHandlers.Login)
-		r.Post("/auth/refresh", authHandlers.Refresh)
+		r.Post("/auth/register", d.Auth.Register)
+		r.Post("/auth/login", d.Auth.Login)
+		r.Post("/auth/refresh", d.Auth.Refresh)
 
 		// Защищённые: требуют access-токен.
 		r.Group(func(r chi.Router) {
-			r.Use(authHandlers.RequireAuth)
+			r.Use(d.Auth.RequireAuth)
 
-			r.Post("/auth/logout", authHandlers.Logout)
-			r.Post("/auth/logout-all", authHandlers.LogoutAll)
-			r.Get("/users/@me", authHandlers.Me)
+			r.Post("/auth/logout", d.Auth.Logout)
+			r.Post("/auth/logout-all", d.Auth.LogoutAll)
+			r.Get("/users/@me", d.Auth.Me)
 
 			// Серверы и каналы.
-			r.Post("/guilds", guildHandlers.Create)
-			r.Get("/guilds", guildHandlers.List)
-			r.Get("/guilds/{guildID}", guildHandlers.Get)
-			r.Post("/guilds/{guildID}/channels", guildHandlers.CreateChannel)
-			r.Post("/guilds/{guildID}/roles", guildHandlers.CreateRole)
-			r.Put("/guilds/{guildID}/members/{userID}/roles/{roleID}", guildHandlers.AssignRole)
-			r.Delete("/guilds/{guildID}/members/{userID}/roles/{roleID}", guildHandlers.UnassignRole)
-			r.Post("/guilds/{guildID}/invites", guildHandlers.CreateInvite)
-			r.Post("/invites/{code}", guildHandlers.JoinByInvite)
+			r.Post("/guilds", d.Guild.Create)
+			r.Get("/guilds", d.Guild.List)
+			r.Get("/guilds/{guildID}", d.Guild.Get)
+			r.Post("/guilds/{guildID}/channels", d.Guild.CreateChannel)
+			r.Post("/guilds/{guildID}/roles", d.Guild.CreateRole)
+			r.Put("/guilds/{guildID}/members/{userID}/roles/{roleID}", d.Guild.AssignRole)
+			r.Delete("/guilds/{guildID}/members/{userID}/roles/{roleID}", d.Guild.UnassignRole)
+			r.Post("/guilds/{guildID}/invites", d.Guild.CreateInvite)
+			r.Post("/invites/{code}", d.Guild.JoinByInvite)
+
+			// Сообщения.
+			r.Post("/channels/{channelID}/messages", d.Messages.Create)
+			r.Get("/channels/{channelID}/messages", d.Messages.List)
+			r.Patch("/messages/{messageID}", d.Messages.Update)
+			r.Delete("/messages/{messageID}", d.Messages.Delete)
 		})
 	})
 
