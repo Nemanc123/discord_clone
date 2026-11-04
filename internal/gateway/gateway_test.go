@@ -126,34 +126,21 @@ func TestReadyHeartbeatAndFanout(t *testing.T) {
 		t.Fatalf("ожидали READY, получили %q", ready.T)
 	}
 
-	// 4. Heartbeat → ACK
+	// 4. Heartbeat → ACK.
+	// Между READY и ACK может прийти PRESENCE_UPDATE (рассылка статуса),
+	// поэтому читаем до нужного op, а не ровно один кадр.
 	if err := conn.WriteJSON(map[string]any{"op": gateway.OpHeartbeat}); err != nil {
 		t.Fatalf("отправка heartbeat: %v", err)
 	}
-	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
-	var ack struct {
-		Op int `json:"op"`
-	}
-	if err := conn.ReadJSON(&ack); err != nil {
-		t.Fatalf("чтение heartbeat ack: %v", err)
-	}
-	if ack.Op != gateway.OpHeartbeatAck {
-		t.Fatalf("ожидали ACK (op 11), получили op %d", ack.Op)
-	}
+	readUntilOp(t, conn, gateway.OpHeartbeatAck)
 
-	// 5. Новое сообщение должно прийти в сокет
+	// 5. Новое сообщение должно прийти в сокет.
+	// Перед ним может прийти PRESENCE_UPDATE, поэтому ищем событие по имени.
 	if _, err := chatSvc.Post(ctx, user, channelID, "привет из теста", nil); err != nil {
 		t.Fatalf("отправка сообщения: %v", err)
 	}
 
-	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
-	var event dispatchFrame
-	if err := conn.ReadJSON(&event); err != nil {
-		t.Fatalf("чтение события: %v", err)
-	}
-	if event.T != "MESSAGE_CREATE" {
-		t.Fatalf("ожидали MESSAGE_CREATE, получили %q", event.T)
-	}
+	event := readUntilEvent(t, conn, "MESSAGE_CREATE")
 	if event.D.Content != "привет из теста" {
 		t.Fatalf("контент = %q", event.D.Content)
 	}

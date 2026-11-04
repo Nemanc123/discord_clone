@@ -176,15 +176,10 @@ func TestResumeReplaysMessageReceivedWhileOffline(t *testing.T) {
 		t.Fatalf("RESUME: %v", err)
 	}
 
-	// Первым должен прийти пропущенный MESSAGE_CREATE.
-	_ = conn2.SetReadDeadline(time.Now().Add(5 * time.Second))
-	var replayed anyFrame
-	if err := conn2.ReadJSON(&replayed); err != nil {
-		t.Fatalf("догон: %v", err)
-	}
-	if replayed.T != "MESSAGE_CREATE" {
-		t.Fatalf("ожидали MESSAGE_CREATE, получили %q", replayed.T)
-	}
+	// Первым значимым событием должен прийти пропущенный MESSAGE_CREATE.
+	// Перед ним в буфере может лежать PRESENCE_UPDATE (статус), поэтому
+	// ищем событие по имени, а не берём ровно следующий кадр.
+	replayed := readUntilEvent(t, conn2, "MESSAGE_CREATE")
 	if replayed.D.Content != "пока тебя не было" {
 		t.Fatalf("контент = %q", replayed.D.Content)
 	}
@@ -193,11 +188,7 @@ func TestResumeReplaysMessageReceivedWhileOffline(t *testing.T) {
 	}
 
 	// Затем — подтверждение восстановления.
-	_ = conn2.SetReadDeadline(time.Now().Add(5 * time.Second))
-	var resumed anyFrame
-	if err := conn2.ReadJSON(&resumed); err != nil {
-		t.Fatalf("RESUMED: %v", err)
-	}
+	resumed := readUntilEvent(t, conn2, "RESUMED")
 	if resumed.T != "RESUMED" {
 		t.Fatalf("ожидали RESUMED, получили %q", resumed.T)
 	}
