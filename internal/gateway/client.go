@@ -1,6 +1,7 @@
 package gateway
 
 import (
+	"context"
 	"encoding/json"
 	"log/slog"
 	"sync/atomic"
@@ -105,7 +106,17 @@ func (c *Client) readPump() {
 	defer func() {
 		// Сессию не удаляем: снимаем только соединение, чтобы события
 		// продолжали копиться до переподключения.
-		c.hub.Detach(c.session)
+		becameOffline := c.hub.Detach(c.session)
+		if becameOffline {
+			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+			for _, guildID := range c.session.Guilds {
+				c.hub.Broadcast(ctx, guildID, "PRESENCE_UPDATE", map[string]string{
+					"user_id": c.session.UserID,
+					"status":  "offline",
+				})
+			}
+			cancel()
+		}
 		c.close()
 		_ = c.conn.Close()
 	}()

@@ -20,6 +20,7 @@ type Deps struct {
 	Auth     *AuthHandlers
 	Guild    *GuildHandlers
 	Messages *MessageHandlers
+	Presence *PresenceHandlers
 	Gateway  http.Handler
 }
 
@@ -77,6 +78,9 @@ func NewRouter(d Deps) http.Handler {
 			r.Get("/channels/{channelID}/messages", d.Messages.List)
 			r.Patch("/messages/{messageID}", d.Messages.Update)
 			r.Delete("/messages/{messageID}", d.Messages.Delete)
+			r.Post("/channels/{channelID}/read", d.Messages.MarkRead)
+			r.Get("/guilds/{guildID}/unread", d.Messages.Unread)
+			r.Get("/guilds/{guildID}/presence", d.Presence.List)
 		})
 	})
 

@@ -31,7 +31,8 @@ type PermissionFilter interface {
 type Hub struct {
 	mu      sync.RWMutex
 	byGuild map[string]map[*Session]struct{}
-	clients map[*Session]*Client // nil-значения нет: отсутствие = офлайн
+	clients map[*Session]*Client // отсутствие = офлайн
+	online  map[string]int       // userID → число активных соединений
 	filter  PermissionFilter
 }
 
@@ -39,6 +40,7 @@ func NewHub() *Hub {
 	return &Hub{
 		byGuild: make(map[string]map[*Session]struct{}),
 		clients: make(map[*Session]*Client),
+		online:  make(map[string]int),
 	}
 }
 
@@ -49,7 +51,8 @@ func (h *Hub) SetFilter(f PermissionFilter) {
 }
 
 // Attach связывает сессию с активным соединением.
-func (h *Hub) Attach(session *Session, client *Client) {
+// Возвращает true, если пользователь только что появился в сети.
+func (h *Hub) Attach(session *Session, client *Client) bool {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
@@ -60,20 +63,44 @@ func (h *Hub) Attach(session *Session, client *Client) {
 		h.byGuild[guildID][session] = struct{}{}
 	}
 	h.clients[session] = client
+
+	becameOnline := h.online[session.UserID] == 0
+	h.online[session.UserID]++
+	return becameOnline
 }
 
-// Detach отвязывает соединение, но оставляет сессию подписанной:
-// события должны продолжаться копиться, пока клиент не вернётся.
-func (h *Hub) Detach(session *Session) {
+// Detach отвязывает соединение, но оставляет сессию подписанной.
+// Возвращает true, если это было последнее соединение пользователя.
+func (h *Hub) Detach(session *Session) bool {
 	h.mu.Lock()
 	defer h.mu.Unlock()
+
+	_, wasOnline := h.clients[session]
 	delete(h.clients, session)
+	if !wasOnline {
+		return false
+	}
+
+	h.online[session.UserID]--
+	if h.online[session.UserID] > 0 {
+		return false
+	}
+
+	delete(h.online, session.UserID)
+	return true
 }
 
 // Drop полностью убирает сессию (истекла или клиент вышел).
 func (h *Hub) Drop(session *Session) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
+
+	if _, wasOnline := h.clients[session]; wasOnline {
+		h.online[session.UserID]--
+		if h.online[session.UserID] <= 0 {
+			delete(h.online, session.UserID)
+		}
+	}
 
 	delete(h.clients, session)
 	for _, guildID := range session.Guilds {
@@ -84,6 +111,31 @@ func (h *Hub) Drop(session *Session) {
 			}
 		}
 	}
+}
+
+// Broadcast рассылает событие уровня гильдии — например, смену статуса.
+// Привязки к каналу нет, поэтому фильтр по правам не применяется.
+func (h *Hub) Broadcast(ctx context.Context, guildID, eventType string, data any) {
+	h.Publish(ctx, guildID, chat.Event{Type: eventType, Data: data})
+}
+
+// OnlineUsers — кто из участников гильдии сейчас в сети.
+func (h *Hub) OnlineUsers(guildID string) []string {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+
+	seen := make(map[string]struct{})
+	for session := range h.byGuild[guildID] {
+		if _, online := h.clients[session]; online {
+			seen[session.UserID] = struct{}{}
+		}
+	}
+
+	out := make([]string, 0, len(seen))
+	for userID := range seen {
+		out = append(out, userID)
+	}
+	return out
 }
 
 // Publish реализует chat.Publisher.

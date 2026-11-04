@@ -292,3 +292,105 @@ func TestMemberWithManageMessagesCanEdit(t *testing.T) {
 		t.Fatalf("модератор должен править: %v", err)
 	}
 }
+
+func unreadFor(t *testing.T, items []store.Unread, channelID string) int64 {
+	t.Helper()
+	for _, item := range items {
+		if item.ChannelID == channelID {
+			return item.Count
+		}
+	}
+	t.Fatalf("канал %s не найден в счётчиках", channelID)
+	return 0
+}
+
+func TestUnreadIgnoresOwnMessages(t *testing.T) {
+	e := newEnv(t)
+	ctx := context.Background()
+
+	for _, text := range []string{"первое", "второе"} {
+		if _, err := e.service.Post(ctx, e.owner, e.channelID, text, nil); err != nil {
+			t.Fatalf("отправка: %v", err)
+		}
+	}
+	if _, err := e.service.Post(ctx, e.member, e.channelID, "третье", nil); err != nil {
+		t.Fatalf("отправка: %v", err)
+	}
+
+	// У владельца непрочитано только чужое сообщение.
+	items, err := e.service.Unread(ctx, e.owner, e.guildID)
+	if err != nil {
+		t.Fatalf("непрочитанные: %v", err)
+	}
+	if got := unreadFor(t, items, e.channelID); got != 1 {
+		t.Fatalf("непрочитано %d, ожидали 1 (свои не считаются)", got)
+	}
+}
+
+func TestMarkReadResetsUnread(t *testing.T) {
+	e := newEnv(t)
+	ctx := context.Background()
+
+	if _, err := e.service.Post(ctx, e.owner, e.channelID, "сообщение", nil); err != nil {
+		t.Fatalf("отправка: %v", err)
+	}
+
+	msgs, err := e.service.History(ctx, e.member, e.channelID, 0, 10)
+	if err != nil {
+		t.Fatalf("история: %v", err)
+	}
+	last := msgs[len(msgs)-1].Seq
+
+	if err := e.service.MarkRead(ctx, e.member, e.channelID, last); err != nil {
+		t.Fatalf("отметка: %v", err)
+	}
+
+	items, err := e.service.Unread(ctx, e.member, e.guildID)
+	if err != nil {
+		t.Fatalf("непрочитанные: %v", err)
+	}
+	if got := unreadFor(t, items, e.channelID); got != 0 {
+		t.Fatalf("после прочтения непрочитано %d, ожидали 0", got)
+	}
+}
+
+func TestMarkReadNeverGoesBackwards(t *testing.T) {
+	e := newEnv(t)
+	ctx := context.Background()
+
+	first, err := e.service.Post(ctx, e.owner, e.channelID, "первое", nil)
+	if err != nil {
+		t.Fatalf("отправка: %v", err)
+	}
+	second, err := e.service.Post(ctx, e.owner, e.channelID, "второе", nil)
+	if err != nil {
+		t.Fatalf("отправка: %v", err)
+	}
+
+	if err := e.service.MarkRead(ctx, e.member, e.channelID, second.Seq); err != nil {
+		t.Fatalf("отметка: %v", err)
+	}
+	// Пытаемся откатить отметку назад.
+	if err := e.service.MarkRead(ctx, e.member, e.channelID, first.Seq); err != nil {
+		t.Fatalf("отметка: %v", err)
+	}
+
+	items, err := e.service.Unread(ctx, e.member, e.guildID)
+	if err != nil {
+		t.Fatalf("непрочитанные: %v", err)
+	}
+	if got := unreadFor(t, items, e.channelID); got != 0 {
+		t.Fatalf("отметка откатилась назад: непрочитано %d", got)
+	}
+}
+
+func TestUnreadRequiresMembership(t *testing.T) {
+	e := newEnv(t)
+	ctx := context.Background()
+
+	stranger := makeUser(t, ctx, e.store)
+
+	if _, err := e.service.Unread(ctx, stranger, e.guildID); !errors.Is(err, chat.ErrForbidden) {
+		t.Fatalf("ожидали запрет, получили %v", err)
+	}
+}

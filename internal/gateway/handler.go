@@ -1,6 +1,7 @@
 package gateway
 
 import (
+	"context"
 	"encoding/json"
 	"log/slog"
 	"net/http"
@@ -146,7 +147,9 @@ func (h *Handler) handleIdentify(r *http.Request, conn *websocket.Conn, raw json
 	}
 
 	client := newClient(h.hub, conn, session)
-	h.hub.Attach(session, client)
+	if becameOnline := h.hub.Attach(session, client); becameOnline {
+		h.announcePresence(session, "online")
+	}
 
 	slog.Info("шлюз: клиент подключился", "user_id", session.UserID, "guilds", len(guildIDs))
 
@@ -211,13 +214,28 @@ func (h *Handler) handleResume(r *http.Request, conn *websocket.Conn, raw json.R
 	}
 
 	client := newClient(h.hub, conn, session)
-	h.hub.Attach(session, client)
+	if becameOnline := h.hub.Attach(session, client); becameOnline {
+		h.announcePresence(session, "online")
+	}
 
 	slog.Info("шлюз: сессия восстановлена",
 		"user_id", session.UserID, "session_id", session.ID, "replayed", len(events))
 
 	go client.writePump()
 	client.readPump()
+}
+
+// announcePresence сообщает гильдиям о смене статуса участника.
+func (h *Handler) announcePresence(session *Session, status string) {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	for _, guildID := range session.Guilds {
+		h.hub.Broadcast(ctx, guildID, "PRESENCE_UPDATE", map[string]string{
+			"user_id": session.UserID,
+			"status":  status,
+		})
+	}
 }
 
 func closeWithCode(conn *websocket.Conn, code int, reason string) {

@@ -216,6 +216,32 @@ func (s *Service) Delete(ctx context.Context, actorID, messageID string) error {
 	return nil
 }
 
+// MarkRead двигает отметку о прочтении до seq.
+func (s *Service) MarkRead(ctx context.Context, userID, channelID string, seq int64) error {
+	if seq < 0 {
+		return fmt.Errorf("%w: seq не может быть отрицательным", ErrValidation)
+	}
+
+	if _, err := s.authorize(ctx, userID, channelID, perms.ViewChannel); err != nil {
+		return err
+	}
+
+	return s.store.MarkRead(ctx, userID, channelID, seq)
+}
+
+// Unread отдаёт счётчики непрочитанных по каналам сервера.
+func (s *Service) Unread(ctx context.Context, userID, guildID string) ([]store.Unread, error) {
+	member, err := s.store.MemberExists(ctx, guildID, userID)
+	if err != nil {
+		return nil, err
+	}
+	if !member {
+		return nil, fmt.Errorf("%w: вы не участник этого сервера", ErrForbidden)
+	}
+
+	return s.store.UnreadForGuild(ctx, userID, guildID)
+}
+
 func (s *Service) requireChannelPermission(ctx context.Context, userID, channelID string, want perms.Permission) error {
 	// Через authorize — чтобы проверка членства была ровно в одном месте.
 	_, err := s.authorize(ctx, userID, channelID, want)

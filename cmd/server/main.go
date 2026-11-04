@@ -85,6 +85,7 @@ func run() error {
 
 	chatService := chat.NewService(store.NewWithPool(pool), guildService, publisher)
 	messageHandlers := api.NewMessageHandlers(chatService)
+	presenceHandlers := api.NewPresenceHandlers(hub, guildService)
 	gatewayHandler := gateway.NewHandler(hub, authService, guildService)
 
 	srv := &http.Server{
@@ -94,6 +95,7 @@ func run() error {
 			Auth:     authHandlers,
 			Guild:    guildHandlers,
 			Messages: messageHandlers,
+			Presence: presenceHandlers,
 			Gateway:  gatewayHandler,
 		}),
 		ReadHeaderTimeout: 5 * time.Second,

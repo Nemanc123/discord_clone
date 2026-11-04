@@ -117,6 +117,51 @@ func (h *MessageHandlers) Delete(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
+type markReadRequest struct {
+	Seq int64 `json:"seq"`
+}
+
+func (h *MessageHandlers) MarkRead(w http.ResponseWriter, r *http.Request) {
+	userID, _ := UserIDFrom(r.Context())
+	channelID := chi.URLParam(r, "channelID")
+
+	var req markReadRequest
+	if err := decodeJSON(w, r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_json", "тело запроса должно быть JSON-объектом")
+		return
+	}
+
+	if err := h.svc.MarkRead(r.Context(), userID, channelID, req.Seq); err != nil {
+		mapChatError(w, err)
+		return
+	}
+
+	w.WriteHeader(http.StatusNoContent)
+}
+
+type unreadResponse struct {
+	ChannelID string `json:"channel_id"`
+	Unread    int64  `json:"unread"`
+}
+
+func (h *MessageHandlers) Unread(w http.ResponseWriter, r *http.Request) {
+	userID, _ := UserIDFrom(r.Context())
+	guildID := chi.URLParam(r, "guildID")
+
+	items, err := h.svc.Unread(r.Context(), userID, guildID)
+	if err != nil {
+		mapChatError(w, err)
+		return
+	}
+
+	out := make([]unreadResponse, 0, len(items))
+	for _, item := range items {
+		out = append(out, unreadResponse{ChannelID: item.ChannelID, Unread: item.Count})
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{"channels": out})
+}
+
 func mapChatError(w http.ResponseWriter, err error) {
 	switch {
 	case errors.Is(err, chat.ErrValidation):

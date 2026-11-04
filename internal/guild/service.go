@@ -116,6 +116,18 @@ func (s *Service) ListGuilds(ctx context.Context, userID string) ([]store.Guild,
 	return s.store.GuildsForUser(ctx, userID)
 }
 
+// RequireMember проверяет, что пользователь состоит в сервере.
+func (s *Service) RequireMember(ctx context.Context, userID, guildID string) error {
+	member, err := s.store.MemberExists(ctx, guildID, userID)
+	if err != nil {
+		return err
+	}
+	if !member {
+		return ErrForbidden
+	}
+	return nil
+}
+
 // DetailFor отдаёт сервер, только если пользователь в нём состоит.
 func (s *Service) DetailFor(ctx context.Context, userID, guildID string) (Detail, error) {
 	member, err := s.store.MemberExists(ctx, guildID, userID)
