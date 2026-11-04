@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -368,7 +369,59 @@ func TestHTTPAttachments(t *testing.T) {
 		t.Fatalf("в ленте нет вложения: %v", messages[0])
 	}
 
-	// 5. Несуществующий ключ прикрепить нельзя.
+	attachmentID := attachments[0].(map[string]any)["id"].(string)
+
+	// 5. Скачивание: 302 на подписанную ссылку, файл отдаёт само хранилище.
+	noRedirect := &http.Client{
+		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+	}
+	dlReq, err := http.NewRequest(http.MethodGet, srv.URL+"/api/v1/attachments/"+attachmentID+"/download", nil)
+	if err != nil {
+		t.Fatalf("запрос скачивания: %v", err)
+	}
+	dlReq.Header.Set("Authorization", "Bearer "+alice.token)
+
+	dlResp, err := noRedirect.Do(dlReq)
+	if err != nil {
+		t.Fatalf("скачивание: %v", err)
+	}
+	_ = dlResp.Body.Close()
+	if dlResp.StatusCode != http.StatusFound {
+		t.Fatalf("скачивание вернуло %d, ожидали 302", dlResp.StatusCode)
+	}
+
+	location := dlResp.Header.Get("Location")
+	if location == "" {
+		t.Fatal("нет Location в ответе скачивания")
+	}
+
+	fileResp, err := http.Get(location)
+	if err != nil {
+		t.Fatalf("получение файла по ссылке: %v", err)
+	}
+	defer func() { _ = fileResp.Body.Close() }()
+
+	downloaded, err := io.ReadAll(fileResp.Body)
+	if err != nil {
+		t.Fatalf("чтение файла: %v", err)
+	}
+	if !bytes.Equal(downloaded, body) {
+		t.Fatalf("содержимое не совпало: %q", downloaded)
+	}
+
+	// 6. Посторонний не получает ссылку.
+	stranger := &client{t: t, base: srv.URL}
+	regStranger := stranger.mustDo("POST", "/api/v1/auth/register", map[string]any{
+		"username": randomName(suffix, "g"),
+		"password": "very-long-password",
+	}, http.StatusCreated)
+	stranger.token = regStranger["access_token"].(string)
+	stranger.mustDo("GET", "/api/v1/attachments/"+attachmentID+"/download", nil, http.StatusForbidden)
+
+	// 7. Несуществующее вложение — 404.
+	alice.mustDo("GET", "/api/v1/attachments/00000000-0000-0000-0000-000000000000/download", nil, http.StatusNotFound)
+
+	// 8. Несуществующий ключ прикрепить нельзя.
 	alice.mustDo("POST", "/api/v1/channels/"+channelID+"/messages", map[string]any{
 		"content": "битая ссылка",
 		"attachments": []map[string]any{{

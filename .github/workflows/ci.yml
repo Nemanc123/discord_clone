@@ -58,8 +58,10 @@ jobs:
             server -s3 -s3.port=8333 -dir=/data -s3.config=/etc/seaweedfs/s3.json
 
           for i in $(seq 1 30); do
-            if (echo > /dev/tcp/127.0.0.1/8333) 2>/dev/null; then
-              echo "хранилище готово за ${i}с"
+            # Открытый порт != готовый S3. Ждём HTTP-ответ (любой код).
+            code=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8333/ || true)
+            if [ "$code" != "000" ]; then
+              echo "хранилище готово за ${i}с (HTTP $code)"
               exit 0
             fi
             sleep 1

@@ -96,6 +96,21 @@ func (h *MessageHandlers) Presign(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// DownloadAttachment отвечает 302 на подписанную ссылку в хранилище.
+// Права проверяются здесь; ссылка живёт час.
+func (h *MessageHandlers) DownloadAttachment(w http.ResponseWriter, r *http.Request) {
+	userID, _ := UserIDFrom(r.Context())
+	attachmentID := chi.URLParam(r, "attachmentID")
+
+	url, err := h.svc.AttachmentDownloadURL(r.Context(), userID, attachmentID)
+	if err != nil {
+		mapChatError(w, err)
+		return
+	}
+
+	http.Redirect(w, r, url, http.StatusFound)
+}
+
 func (h *MessageHandlers) List(w http.ResponseWriter, r *http.Request) {
 	userID, _ := UserIDFrom(r.Context())
 	channelID := chi.URLParam(r, "channelID")
@@ -213,6 +228,8 @@ func mapChatError(w http.ResponseWriter, err error) {
 		writeError(w, http.StatusForbidden, "forbidden", "недостаточно прав для этого действия")
 	case errors.Is(err, store.ErrMessageNotFound):
 		writeError(w, http.StatusNotFound, "not_found", "сообщение не найдено")
+	case errors.Is(err, store.ErrAttachmentNotFound):
+		writeError(w, http.StatusNotFound, "not_found", "вложение не найдено")
 	case errors.Is(err, store.ErrChannelNotFound):
 		writeError(w, http.StatusNotFound, "not_found", "канал не найден")
 	default:

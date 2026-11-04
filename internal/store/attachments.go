@@ -2,8 +2,13 @@ package store
 
 import (
 	"context"
+	"errors"
 	"fmt"
+
+	"github.com/jackc/pgx/v5"
 )
+
+var ErrAttachmentNotFound = errors.New("вложение не найдено")
 
 type Attachment struct {
 	ID          string
@@ -12,6 +17,13 @@ type Attachment struct {
 	ContentType string
 	SizeBytes   int64
 	StorageKey  string
+}
+
+// AttachmentWithChannel — вложение вместе с каналом его сообщения.
+// Канал нужен, чтобы проверить VIEW_CHANNEL перед выдачей ссылки.
+type AttachmentWithChannel struct {
+	Attachment
+	ChannelID string
 }
 
 type CreateAttachmentParams struct {
@@ -67,4 +79,29 @@ func (s *Store) AttachmentsForMessages(ctx context.Context, messageIDs []string)
 	}
 
 	return out, rows.Err()
+}
+
+// AttachmentByID возвращает вложение и канал его сообщения.
+// Удалённые сообщения не отдают вложения: файл остаётся, но ссылка — нет.
+func (s *Store) AttachmentByID(ctx context.Context, id string) (AttachmentWithChannel, error) {
+	const query = `
+		SELECT a.id::text, a.message_id::text, a.filename, a.content_type,
+		       a.size_bytes, a.storage_key, m.channel_id::text
+		  FROM attachments a
+		  JOIN messages m ON m.id = a.message_id
+		 WHERE a.id = $1::uuid
+		   AND m.deleted_at IS NULL`
+
+	var a AttachmentWithChannel
+	err := s.db.QueryRow(ctx, query, id).Scan(
+		&a.ID, &a.MessageID, &a.Filename, &a.ContentType,
+		&a.SizeBytes, &a.StorageKey, &a.ChannelID,
+	)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return AttachmentWithChannel{}, ErrAttachmentNotFound
+		}
+		return AttachmentWithChannel{}, fmt.Errorf("вложение по id: %w", err)
+	}
+	return a, nil
 }

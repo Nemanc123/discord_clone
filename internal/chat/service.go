@@ -50,6 +50,7 @@ type Publisher interface {
 // AttachmentStorage — минимум, который нужен сервису от хранилища файлов.
 type AttachmentStorage interface {
 	PresignedPut(ctx context.Context, key string) (string, error)
+	PresignedGet(ctx context.Context, key string) (string, error)
 	Stat(ctx context.Context, key string) (size int64, exists bool, err error)
 }
 
@@ -418,6 +419,25 @@ func randomID() string {
 		return fmt.Sprintf("t%d", time.Now().UnixNano())
 	}
 	return hex.EncodeToString(buf)
+}
+
+// AttachmentDownloadURL выдаёт временную ссылку на файл. Права проверяются
+// здесь, в канале сообщения: S3 про права ничего не знает.
+func (s *Service) AttachmentDownloadURL(ctx context.Context, userID, attachmentID string) (string, error) {
+	if s.storage == nil {
+		return "", fmt.Errorf("%w: хранилище файлов не настроено", ErrValidation)
+	}
+
+	attachment, err := s.store.AttachmentByID(ctx, attachmentID)
+	if err != nil {
+		return "", err
+	}
+
+	if _, err := s.authorize(ctx, userID, attachment.ChannelID, perms.ViewChannel); err != nil {
+		return "", err
+	}
+
+	return s.storage.PresignedGet(ctx, attachment.StorageKey)
 }
 
 func (s *Service) requireChannelPermission(ctx context.Context, userID, channelID string, want perms.Permission) error {
